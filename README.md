@@ -1,0 +1,1 @@
+# ha_plugin_menu_yandex
