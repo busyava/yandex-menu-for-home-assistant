@@ -10,6 +10,8 @@ is called by voice, which room it belongs to, and which lamp actually turns on w
 No separate Yandex login is needed — the integration reuses the session that the
 [Yandex Station](https://github.com/AlexxIT/YandexStation) integration already maintains.
 
+![The Yandex menu panel in Home Assistant: the device list and the editor with voice names](docs/panel.png)
+
 ## Why you might need it
 
 Two everyday annoyances:
