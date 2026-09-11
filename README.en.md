@@ -129,6 +129,16 @@ it in the panel and expose the entity again.
 **A Yandex error shown in the panel.** Those texts come from Yandex itself and are displayed as is:
 "this device already has such a name", "too many names for a device" and the like.
 
+## Support the project
+
+The plugin is free and will stay that way. If it saved you an evening of fighting with Alice
+settings, you can say thanks:
+
+[![Support](https://img.shields.io/badge/Support-CloudTips-2ea44f?style=for-the-badge)](https://pay.cloudtips.ru/p/a2eedc67)
+
+Any amount, card payment, no sign-up needed. Note that CloudTips accepts cards issued by Russian
+banks only — international cards will not go through.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
