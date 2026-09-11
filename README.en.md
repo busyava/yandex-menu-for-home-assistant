@@ -1,4 +1,4 @@
-# Yandex Menu for Home Assistant
+<h1><img src="custom_components/yandex_menu/brand/icon.png" width="32" align="top" alt=""> Yandex Menu for Home Assistant</h1>
 
 [Русская версия](README.md)
 

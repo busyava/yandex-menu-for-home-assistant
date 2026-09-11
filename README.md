@@ -1,4 +1,4 @@
-# Яндекс меню для Home Assistant
+<h1><img src="custom_components/yandex_menu/brand/icon.png" width="32" align="top" alt=""> Яндекс меню для Home Assistant</h1>
 
 [English version](README.en.md)
 
