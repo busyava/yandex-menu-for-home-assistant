@@ -140,10 +140,9 @@ it in the panel and expose the entity again.
 
 ## Support the project
 
-The plugin is free and will stay that way. If it saved you an evening of fighting with Alice
-settings, you can say thanks:
+The plugin is free and will stay that way. If it came in handy, you can buy the author a coffee:
 
-[![Support](https://img.shields.io/badge/Support-CloudTips-2ea44f?style=for-the-badge)](https://pay.cloudtips.ru/p/a2eedc67)
+<a href="https://pay.cloudtips.ru/p/a2eedc67"><img src="docs/coffee-en.png" width="214" alt="Buy the author a coffee"></a>
 
 Any amount, card payment, no sign-up needed. Note that CloudTips accepts cards issued by Russian
 banks only — international cards will not go through.
