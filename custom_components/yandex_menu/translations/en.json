@@ -1,0 +1,14 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Yandex menu",
+        "description": "Adds a \"Yandex menu\" panel to the sidebar. Access to the Yandex smart home is taken from the Yandex Station integration, no separate login needed."
+      }
+    },
+    "abort": {
+      "already_configured": "Already set up.",
+      "no_yandex_station": "Set up the Yandex Station integration first — it provides access to the Yandex smart home."
+    }
+  }
+}

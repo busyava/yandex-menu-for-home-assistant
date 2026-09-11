@@ -1,0 +1,14 @@
+{
+  "domain": "yandex_menu",
+  "name": "Яндекс меню",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://github.com/busyava/ha_plugin_menu_yandex",
+  "issue_tracker": "https://github.com/busyava/ha_plugin_menu_yandex/issues",
+  "dependencies": ["http", "frontend", "websocket_api"],
+  "after_dependencies": ["yandex_station", "yandex_smart_home"],
+  "codeowners": ["@busyava"],
+  "iot_class": "cloud_polling",
+  "integration_type": "service",
+  "requirements": []
+}
