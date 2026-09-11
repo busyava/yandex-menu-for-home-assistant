@@ -1,4 +1,4 @@
-<h1><img src="custom_components/yandex_menu/brand/icon.png" width="32" align="top" alt=""> Яндекс меню для Home Assistant</h1>
+# Яндекс меню для Home Assistant
 
 [English version](README.en.md)
 
@@ -9,7 +9,7 @@
 Отдельный вход в Яндекс не нужен — интеграция пользуется тем же доступом, что уже настроен
 у [Яндекс.Станции](https://github.com/AlexxIT/YandexStation).
 
-![Панель «Яндекс меню» в Home Assistant: список устройств Яндекс-дома и карточка с именами для голоса](docs/panel.png)
+![Панель «Яндекс меню» в Home Assistant: список устройств Яндекс-дома и карточка с именами для голоса](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/panel.png)
 
 ## Зачем это нужно
 
@@ -141,7 +141,7 @@ Home Assistant, к которой устройство привязано. Те�
 
 Плагин бесплатный и таким останется. Если пригодился — можно угостить автора кофе:
 
-<a href="https://pay.cloudtips.ru/p/a2eedc67"><img src="docs/coffee-ru.png" width="228" alt="Автору на чашку кофе"></a>
+[![Автору на чашку кофе](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/coffee-ru.png)](https://pay.cloudtips.ru/p/a2eedc67)
 
 Сумму выбираете сами, платёж картой, регистрироваться не нужно. Принимаются карты российских банков.
 

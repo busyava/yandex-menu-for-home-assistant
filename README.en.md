@@ -1,4 +1,4 @@
-<h1><img src="custom_components/yandex_menu/brand/icon.png" width="32" align="top" alt=""> Yandex Menu for Home Assistant</h1>
+# Yandex Menu for Home Assistant
 
 [Русская версия](README.md)
 
@@ -10,7 +10,7 @@ is called by voice, which room it belongs to, and which lamp actually turns on w
 No separate Yandex login is needed — the integration reuses the session that the
 [Yandex Station](https://github.com/AlexxIT/YandexStation) integration already maintains.
 
-![The Yandex menu panel in Home Assistant: the device list and the editor with voice names](docs/panel.png)
+![The Yandex menu panel in Home Assistant: the device list and the editor with voice names](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/panel.png)
 
 ## Why you might need it
 
@@ -142,7 +142,7 @@ it in the panel and expose the entity again.
 
 The plugin is free and will stay that way. If it came in handy, you can buy the author a coffee:
 
-<a href="https://pay.cloudtips.ru/p/a2eedc67"><img src="docs/coffee-en.png" width="227" alt="Buy the author a coffee"></a>
+[![Buy the author a coffee](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/coffee-en.png)](https://pay.cloudtips.ru/p/a2eedc67)
 
 Any amount, card payment, no sign-up needed. Note that CloudTips accepts cards issued by Russian
 banks only — international cards will not go through.
