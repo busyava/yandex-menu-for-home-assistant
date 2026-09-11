@@ -14,15 +14,22 @@ No separate Yandex login is needed — the integration reuses the session that t
 
 ## Why you might need it
 
-Two everyday annoyances:
+A home collects a dozen devices over time, and the real problem is remembering what they are called.
+To switch off one lamp in the living room you start guessing: "Alice, turn off the chandelier" —
+wrong one, "turn off the ambient light" — wrong again. The names live in the Yandex app while you
+are sitting in front of Home Assistant.
 
-**"Alice, turn on the light" switches on every lamp in the room.** That happens when all the lamps
-are marked as the room's *main light*. Keep the ceiling lamp as the main one, mark the pendant,
-the ambient strip and the spots as *secondary*, and the command will only turn on the ceiling lamp
-while the rest still answer to their own names.
+The panel shows everything at once: one click in the sidebar and you get the full list by room —
+which devices exist in your Yandex smart home at all and what each of them is called by voice. The
+linked Home Assistant entity is right there next to it. No need to reach for the phone.
 
-**A device answers to the wrong name.** Yandex allows up to five names per device: one primary and
-four synonyms. Here you see them as a list and edit them without reaching for the phone.
+From there you can simply look the name up, or fix it on the spot: give the
+device a name that makes sense, or add synonyms so it answers to whichever variant comes to mind
+first. If you cannot tell which device you are looking at, the "blink" button turns it on for three
+seconds.
+
+The familiar "Alice, turn on the light", which lights up the whole room at once, gets fixed here
+too — lamps have a main and a secondary light role.
 
 ## Features
 
