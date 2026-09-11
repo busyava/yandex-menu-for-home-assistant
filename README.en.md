@@ -64,7 +64,7 @@ to **label** mode — the panel adds and removes exactly that label.
 ### Via HACS
 
 1. HACS → three-dot menu → **Custom repositories**.
-2. URL `https://github.com/busyava/ha_plugin_menu_yandex`, category **Integration**.
+2. URL `https://github.com/busyava/yandex-menu-for-home-assistant`, category **Integration**.
 3. Find "Яндекс меню" in the list and click **Download**.
 4. Restart Home Assistant.
 5. **Settings → Devices & services → Add integration → Яндекс меню.** No credentials are asked,
