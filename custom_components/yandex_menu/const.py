@@ -21,22 +21,44 @@ API = "https://iot.quasar.yandex.ru"
 # Потолок Яндекса: основное имя + 4 синонима
 MAX_NAMES = 5
 
-# Домены, сущности которых имеет смысл отдавать в Алису
+# Домены, которые Yandex Smart Home умеет отдавать в Алису (сверено с его device.py)
 EXPOSABLE_DOMAINS = (
-    "light",
-    "switch",
-    "cover",
-    "fan",
-    "climate",
-    "lock",
-    "vacuum",
-    "humidifier",
-    "media_player",
-    "script",
-    "scene",
-    "input_boolean",
+    "air_quality",
+    "automation",
+    "binary_sensor",
     "button",
+    "camera",
+    "climate",
+    "cover",
+    "event",
+    "fan",
+    "group",
+    "humidifier",
+    "input_boolean",
+    "input_button",
+    "input_text",
+    "light",
+    "lock",
+    "media_player",
+    "remote",
+    "scene",
+    "script",
+    "sensor",
+    "switch",
+    "vacuum",
+    "valve",
     "water_heater",
+)
+
+# У этих доменов всё решают показания: датчик с текстом вместо числа или без класса
+# Яндекс не примет. Поэтому перед показом спрашиваем сам Yandex Smart Home.
+CONDITIONAL_DOMAINS = (
+    "air_quality",
+    "binary_sensor",
+    "camera",
+    "event",
+    "input_text",
+    "sensor",
 )
 
 STORAGE_KEY = "yandex_menu.snapshots"
@@ -50,4 +72,4 @@ DATA_WS_REGISTERED = "ws_registered"
 
 CACHE_TTL = 15  # секунд, чтобы повторное открытие панели не дёргало Яндекс заново
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import logging
+import sys
 import time
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -19,6 +21,7 @@ from homeassistant.helpers import (
 
 from .const import (
     CACHE_TTL,
+    CONDITIONAL_DOMAINS,
     DATA_API,
     DATA_CACHE,
     DATA_SNAPSHOTS,
@@ -196,6 +199,37 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     return payload
 
 
+def _yaha_can_export(hass: HomeAssistant) -> Callable[[str, State | None], bool]:
+    """Проверка «уйдёт ли сущность в Алису» по правилам самого Yandex Smart Home.
+
+    Если его внутренности недоступны (другая версия), проверяем грубо:
+    у датчика должен быть класс, иначе Яндекс не поймёт, что он измеряет.
+    """
+
+    def by_device_class(_entity_id: str, state: State | None) -> bool:
+        return bool(state and state.attributes.get("device_class"))
+
+    module = sys.modules.get(f"custom_components.{YAHA_DOMAIN}.device")
+    component = hass.data.get(YAHA_DOMAIN)
+    entries = hass.config_entries.async_entries(YAHA_DOMAIN)
+    if module is None or component is None or not entries:
+        return by_device_class
+    try:
+        entry_data = component.get_entry_data(entries[0])
+        yaha_device = module.Device
+    except Exception:  # noqa: BLE001 — устройство Yandex Smart Home поменялось
+        return by_device_class
+
+    def by_yaha(entity_id: str, state: State | None) -> bool:
+        try:
+            device = yaha_device(hass, entry_data, entity_id, state)
+            return bool(device.get_capabilities() or device.get_properties())
+        except Exception:  # noqa: BLE001
+            return by_device_class(entity_id, state)
+
+    return by_yaha
+
+
 def _unexposed_entities(
     hass: HomeAssistant, exposed: set[str]
 ) -> list[dict[str, Any]]:
@@ -203,6 +237,7 @@ def _unexposed_entities(
     registry = er.async_get(hass)
     areas = ar.async_get(hass)
     devices = dr.async_get(hass)
+    can_export = _yaha_can_export(hass)
     result: list[dict[str, Any]] = []
     for entity in registry.entities.values():
         if entity.domain not in EXPOSABLE_DOMAINS:
@@ -212,6 +247,8 @@ def _unexposed_entities(
         if entity.entity_id in exposed:
             continue
         state = hass.states.get(entity.entity_id)
+        if entity.domain in CONDITIONAL_DOMAINS and not can_export(entity.entity_id, state):
+            continue
         area_id = entity.area_id
         if not area_id and entity.device_id:
             device_entry = devices.async_get(entity.device_id)
