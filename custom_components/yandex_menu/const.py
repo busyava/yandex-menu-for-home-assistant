@@ -13,6 +13,9 @@ PANEL_JS = "yandex-menu-panel.js"
 PANEL_TITLE = "Яндекс меню"
 PANEL_ICON = "mdi:account-voice"
 
+# Настройка интеграции: показывать ли пункт в левом меню (по умолчанию да)
+CONF_SHOW_IN_SIDEBAR = "show_in_sidebar"
+
 API = "https://iot.quasar.yandex.ru"
 
 # Потолок Яндекса: основное имя + 4 синонима
@@ -47,4 +50,4 @@ DATA_WS_REGISTERED = "ws_registered"
 
 CACHE_TTL = 15  # секунд, чтобы повторное открытие панели не дёргало Яндекс заново
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"

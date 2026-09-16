@@ -4,6 +4,12 @@
 
 const LIMIT_FALLBACK = 5;
 
+/* Состояния сущностей HA, при которых значок устройства светится. */
+const ON_STATES = new Set([
+  "on", "open", "opening", "closing", "playing", "cleaning", "returning",
+  "heat", "cool", "heat_cool", "auto", "dry", "fan_only",
+]);
+
 const ICONS = {
   light:
     "M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z",
@@ -44,6 +50,7 @@ const STYLES = `
     --danger: var(--error-color, #db4437);
     --warn: var(--warning-color, #ffa600);
     --ok: var(--success-color, #43a047);
+    --lit: var(--state-light-active-color, var(--state-active-color, #ff9800));
     --mono: ui-monospace, SFMono-Regular, "Roboto Mono", Menlo, monospace;
   }
   * { box-sizing: border-box; }
@@ -92,7 +99,7 @@ const STYLES = `
   .card { background: var(--surface); border-radius: 12px; box-shadow: var(--ha-card-box-shadow, 0 1px 3px rgba(0,0,0,.12)); overflow: hidden; }
   .row {
     display: grid;
-    grid-template-columns: 36px minmax(150px, 1.4fr) minmax(140px, 1.6fr) 120px 10px;
+    grid-template-columns: 36px minmax(150px, 1.4fr) minmax(140px, 1.6fr) 120px;
     gap: 14px; align-items: center; width: 100%; text-align: left;
     padding: 10px 14px; background: transparent; border: 0;
     border-top: 1px solid var(--line);
@@ -101,8 +108,14 @@ const STYLES = `
   .row:first-child { border-top: 0; }
   .row:hover { background: var(--surface-2); }
   .row.selected { background: rgba(3,169,244,.12); }
-  .avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); }
-  .row.lit .avatar { background: rgba(255,167,38,.2); color: #e69500; }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none;
+    background: var(--surface-2); color: var(--muted); transition: background .25s, color .25s, box-shadow .25s;
+  }
+  .row.lit .avatar, .avatar.lit {
+    background: color-mix(in srgb, var(--lit) 22%, transparent); color: var(--lit);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--lit) 55%, transparent);
+  }
   .title { font-weight: 500; }
   .entity { font-family: var(--mono); font-size: 11.5px; color: var(--muted); word-break: break-all; }
   .chips { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -110,8 +123,6 @@ const STYLES = `
   .chip.primary { background: rgba(3,169,244,.16); color: var(--accent); font-weight: 500; }
   .role { font-size: 11.5px; color: var(--muted); }
   .role b { color: var(--primary-text-color); font-weight: 500; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); justify-self: end; }
-  .dot.off { background: var(--muted); opacity: .4; }
 
   .panel {
     width: 420px; flex: none; border-left: 1px solid var(--line);
@@ -179,8 +190,8 @@ const STYLES = `
 
   @media (max-width: 900px) {
     .panel { position: fixed; inset: 0; width: auto; z-index: 8; border-left: 0; }
-    .row { grid-template-columns: 36px 1fr 10px; row-gap: 6px; }
-    .row .chips, .row .role { grid-column: 2 / 4; }
+    .row { grid-template-columns: 36px 1fr; row-gap: 6px; }
+    .row .chips, .row .role { grid-column: 2; }
     .row.offer { grid-template-columns: 36px 1fr auto; }
     .row.offer .role { grid-column: 2; grid-row: 2; }
     .row.offer .btn { grid-column: 3; grid-row: 1 / 3; }
@@ -206,7 +217,9 @@ class YandexMenuPanel extends HTMLElement {
       this._loaded = true;
       this._render();
       this._load(true);
+      return;
     }
+    this._refreshLit();
   }
 
   set narrow(value) {
@@ -284,6 +297,28 @@ class YandexMenuPanel extends HTMLElement {
     if (type.includes("sensor")) return ICONS.sensor;
     if (device.external_id && device.external_id.startsWith("script.")) return ICONS.script;
     return ICONS.other;
+  }
+
+  /** Включено ли устройство: у сущностей HA — по живому состоянию, у остальных — по Яндексу. */
+  _isOn(device) {
+    if (!device.switchable) return false; // датчики не «включаются»: открытая дверь не должна светиться
+    const states = (this._hass && this._hass.states) || {};
+    const entity = device.external_id ? states[device.external_id] : null;
+    if (entity) return ON_STATES.has(entity.state);
+    return device.on === true;
+  }
+
+  /** Состояния в HA меняются постоянно — обновляем только подсветку, без перерисовки. */
+  _refreshLit() {
+    const root = this.shadowRoot;
+    if (!root || !this._data) return;
+    for (const row of root.querySelectorAll(".row[data-id]")) {
+      const device = this._device(row.getAttribute("data-id"));
+      if (device) row.classList.toggle("lit", this._isOn(device));
+    }
+    const head = root.querySelector(".panel-head .avatar");
+    const selected = this._device(this._selected);
+    if (head && selected) head.classList.toggle("lit", this._isOn(selected));
   }
 
   _roleWord(device) {
@@ -433,15 +468,15 @@ class YandexMenuPanel extends HTMLElement {
               `<span class="chip${index === 0 ? " primary" : ""}">${this._esc(name)}</span>`
           )
           .join("");
-        html += `<button class="row${device.id === this._selected ? " selected" : ""}" data-id="${
-          device.id
-        }">
+        const classes = ["row"];
+        if (device.id === this._selected) classes.push("selected");
+        if (this._isOn(device)) classes.push("lit");
+        html += `<button class="${classes.join(" ")}" data-id="${device.id}">
           <span class="avatar">${this._svg(this._iconFor(device), 18)}</span>
           <span><span class="title">${this._esc(device.names[0])}</span><br>
             <span class="entity">${this._esc(device.external_id || "устройство Яндекса")}</span></span>
           <span class="chips">${chips}</span>
           <span class="role">${this._roleWord(device) ? `<b>${this._roleWord(device)}</b>` : ""}</span>
-          <span class="dot${device.state === "online" ? "" : " off"}"></span>
         </button>`;
       }
       html += `</div></section>`;
@@ -537,7 +572,7 @@ class YandexMenuPanel extends HTMLElement {
 
     host.innerHTML = `
       <div class="panel-head">
-        <span class="avatar">${this._svg(this._iconFor(device), 20)}</span>
+        <span class="avatar${this._isOn(device) ? " lit" : ""}">${this._svg(this._iconFor(device), 20)}</span>
         <div>
           <h3>${this._esc(device.names[0])}</h3>
           <div class="entity">${this._esc(device.external_id || "устройство Яндекса")}</div>

@@ -80,10 +80,14 @@ to **label** mode — the panel adds and removes exactly that label.
 The sidebar item appears afterwards and is visible to administrators only. If you don't see it,
 reload the page with Ctrl+Shift+R — browsers cache the sidebar.
 
+To hide the item, open **Settings → Devices & services → Yandex menu → Configure**. The panel stays
+available at `/yandex-menu`.
+
 ## Usage
 
 The list on the left groups devices by room and shows the name, the linked Home Assistant entity,
-the synonyms, the role and an online dot. Clicking a device opens the editor on the right.
+the synonyms and the role. The icon of a device that is on lights up. Clicking a device opens the
+editor on the right.
 
 ### Names
 

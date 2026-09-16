@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 
 from . import ws_api
 from .const import (
+    CONF_SHOW_IN_SIDEBAR,
     DATA_API,
     DATA_CACHE,
     DATA_SNAPSHOTS,
@@ -51,11 +52,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ws_api.async_register(hass)
         data[DATA_WS_REGISTERED] = True
 
-    await _async_register_panel(hass)
+    await _async_register_panel(hass, entry)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
 
 
-async def _async_register_panel(hass: HomeAssistant) -> None:
+async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Сменили настройки — перерегистрируем панель с пунктом меню или без."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None:
     data = hass.data[DOMAIN]
     if not data.get(DATA_PANEL_REGISTERED):
         panel_dir = Path(__file__).parent / "panel"
@@ -64,11 +71,13 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         )
         data[DATA_PANEL_REGISTERED] = True
 
+    # Без заголовка и значка панель не попадает в левое меню, но открывается по адресу
+    in_sidebar = entry.options.get(CONF_SHOW_IN_SIDEBAR, True)
     frontend.async_register_built_in_panel(
         hass,
         component_name="custom",
-        sidebar_title=PANEL_TITLE,
-        sidebar_icon=PANEL_ICON,
+        sidebar_title=PANEL_TITLE if in_sidebar else None,
+        sidebar_icon=PANEL_ICON if in_sidebar else None,
         frontend_url_path=PANEL_URL_PATH,
         require_admin=True,
         config={

@@ -89,6 +89,15 @@ def _remember(
         snapshots[key] = fresh
 
 
+def _on_state(device: dict[str, Any]) -> bool | None:
+    """Включено ли устройство по данным Яндекса. None — у него нет вкл/выкл."""
+    for capability in device.get("capabilities") or []:
+        if capability.get("type") == "devices.capabilities.on_off":
+            value = (capability.get("state") or {}).get("value")
+            return value if isinstance(value, bool) else None
+    return None
+
+
 def _snapshot_of(device: dict[str, Any]) -> dict[str, Any]:
     return {
         "names": list(device.get("names") or []),
@@ -147,7 +156,6 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
             "type_switchable": bool(device_type.get("switchable")),
             "room": room_name,
             "room_id": room_id,
-            "state": device.get("state"),
             "external_id": external_id,
             "from_ha": from_ha,
             "skill_id": config.get("skill_id"),
@@ -155,6 +163,7 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
                 capability.get("type") == "devices.capabilities.on_off"
                 for capability in (device.get("capabilities") or [])
             ),
+            "on": _on_state(device),
         }
         if from_ha:
             entry["ha_state"] = hass.states.get(external_id) is not None
