@@ -72,7 +72,7 @@ const STYLES = `
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
     border: 1px solid var(--line); background: var(--surface);
-    border-radius: 999px; padding: 7px 15px; font-size: 13.5px;
+    border-radius: 999px; padding: 7px 15px; font-size: 13.5px; white-space: nowrap;
   }
   .btn:hover:not([disabled]) { border-color: var(--accent); color: var(--accent); }
   .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--text-primary-color, #fff); }
@@ -97,6 +97,7 @@ const STYLES = `
     padding: 10px 14px; background: transparent; border: 0;
     border-top: 1px solid var(--line);
   }
+  .row.offer { grid-template-columns: 36px minmax(150px, 1.4fr) minmax(140px, 1.6fr) auto; }
   .row:first-child { border-top: 0; }
   .row:hover { background: var(--surface-2); }
   .row.selected { background: rgba(3,169,244,.12); }
@@ -180,6 +181,9 @@ const STYLES = `
     .panel { position: fixed; inset: 0; width: auto; z-index: 8; border-left: 0; }
     .row { grid-template-columns: 36px 1fr 10px; row-gap: 6px; }
     .row .chips, .row .role { grid-column: 2 / 4; }
+    .row.offer { grid-template-columns: 36px 1fr auto; }
+    .row.offer .role { grid-column: 2; grid-row: 2; }
+    .row.offer .btn { grid-column: 3; grid-row: 1 / 3; }
   }
 `;
 
@@ -449,14 +453,13 @@ class YandexMenuPanel extends HTMLElement {
     if (query && unexposed.length) {
       html += `<section><div class="room-head"><h2>Есть в Home Assistant, но не отдано в Алису</h2><span class="count">${unexposed.length}</span></div><div class="card">`;
       for (const item of unexposed.slice(0, 40)) {
-        html += `<div class="row">
+        html += `<div class="row offer">
           <span class="avatar">${this._svg(ICONS.other, 18)}</span>
           <span><span class="title">${this._esc(item.name)}</span><br>
             <span class="entity">${this._esc(item.entity_id)}</span></span>
           <span class="role">${item.area ? "зона " + this._esc(item.area) : ""}${
           item.available === false ? ` <b style="color:var(--warn)">недоступна</b>` : ""
         }</span>
-          <span></span>
           <button class="btn btn-quiet" data-expose="${this._esc(item.entity_id)}">Отдать в Алису</button>
         </div>`;
       }
