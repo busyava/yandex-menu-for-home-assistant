@@ -12,12 +12,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from . import ws_api
+from .accounts import account_key
 from .const import (
     CONF_SHOW_IN_SIDEBAR,
     DATA_API,
     DATA_CACHE,
+    DATA_DETAILS,
     DATA_SNAPSHOTS,
     DATA_STORE,
+    DATA_STORE_DATA,
     DATA_WS_REGISTERED,
     DOMAIN,
     PANEL_ICON,
@@ -41,12 +44,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = hass.data.setdefault(DOMAIN, {})
 
     store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-    snapshots = await store.async_load() or {}
+    stored = await store.async_load() or {}
+    if "accounts" not in stored:
+        # До выбора аккаунта слепки лежали одним списком — отдаём их текущему аккаунту
+        stored = {"accounts": {account_key(hass): stored} if stored else {}}
 
     data[DATA_API] = QuasarApi(hass)
     data[DATA_STORE] = store
-    data[DATA_SNAPSHOTS] = snapshots
+    data[DATA_STORE_DATA] = stored
+    data[DATA_SNAPSHOTS] = stored["accounts"].setdefault(account_key(hass), {})
     data[DATA_CACHE] = None
+    data[DATA_DETAILS] = {}  # после смены аккаунта чужие карточки не нужны
 
     if not data.get(DATA_WS_REGISTERED):
         ws_api.async_register(hass)
@@ -58,7 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Сменили настройки — перерегистрируем панель с пунктом меню или без."""
+    """Сменили настройки — перезапускаем: пункт меню, аккаунт и кэш берутся заново."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -97,5 +105,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     frontend.async_remove_panel(hass, PANEL_URL_PATH)
     store: Store | None = hass.data.get(DOMAIN, {}).get(DATA_STORE)
     if store:
-        await store.async_save(hass.data[DOMAIN][DATA_SNAPSHOTS])
+        await store.async_save(hass.data[DOMAIN][DATA_STORE_DATA])
     return True

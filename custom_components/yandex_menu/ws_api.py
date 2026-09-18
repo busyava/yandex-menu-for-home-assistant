@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import logging
+import re
 import sys
 import time
 from typing import Any
@@ -19,23 +20,41 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
+from .accounts import station_entries, station_entry, yaha_entries, yaha_entry
 from .const import (
     CACHE_TTL,
     CONDITIONAL_DOMAINS,
     DATA_API,
     DATA_CACHE,
+    DATA_DETAILS,
     DATA_SNAPSHOTS,
     DATA_STORE,
+    DATA_STORE_DATA,
     DOMAIN,
     EXPOSABLE_DOMAINS,
     MAX_NAMES,
     YAHA_DOMAIN,
+    YS_DOMAIN,
 )
 from .quasar_api import QuasarApi, QuasarError
 
 _LOGGER = logging.getLogger(__name__)
 
 PARALLEL_CONFIG_REQUESTS = 6
+
+# Служебные сценарии Яндекс.Станции: через них она шлёт команды из облака
+HELPER_SCENARIO = re.compile(r"^ХА [0-9a-f-]{36}$")
+
+# Умения, которыми управляют голосом. quasar.* у колонок — служебные.
+VOICE_CAPABILITIES = ("on_off", "color_setting", "range", "mode", "toggle", "video_stream")
+
+# В общем списке у этих умений нет названий значений (цвета, режимы) и бывают
+# пропуски, поэтому за ними идём в карточку устройства. Остальным хватает списка.
+DETAIL_CAPABILITIES = ("devices.capabilities.color_setting", "devices.capabilities.mode")
+
+# Умения почти не меняются, а Яндекс.Станция держит паузу 0,2 с между запросами.
+# Карточки кэшируем, чтобы каждое открытие панели не стоило лишних секунд.
+DETAIL_TTL = 600
 
 
 # --------------------------------------------------------------------- helpers
@@ -47,7 +66,17 @@ def _api(hass: HomeAssistant) -> QuasarApi:
 
 def _label_info(hass: HomeAssistant) -> dict[str, Any]:
     """Как Yaha решает, что отдавать в Алису: метка или ручной список."""
-    for entry in hass.config_entries.async_entries(YAHA_DOMAIN):
+    entry = yaha_entry(hass)
+    if entry is None and yaha_entries(hass):
+        return {
+            "supported": False,
+            "label_id": None,
+            "reason": (
+                "Запись Yandex Smart Home, выбранная в настройках, удалена — выберите "
+                "другую: Настройки → Устройства и службы → Яндекс меню → Настроить."
+            ),
+        }
+    if entry is not None:
         options = entry.options or {}
         source = options.get("filter_source")
         label = options.get("label")
@@ -92,6 +121,155 @@ def _remember(
         snapshots[key] = fresh
 
 
+def _skills_of(source: dict[str, Any]) -> dict[str, Any]:
+    """Умения устройства в компактном виде: только то, что нужно для фраз.
+
+    Годится и для карточки устройства, и для строки общего списка — но в
+    общем списке Яндекс отдаёт умения неполно и без названий значений.
+    """
+    capabilities: list[dict[str, Any]] = []
+    properties: list[dict[str, Any]] = []
+    if "smart_speaker" in (source.get("type") or ""):
+        # у колонок служебные умения, голосом ими не управляют
+        return {"capabilities": capabilities, "properties": properties}
+
+    for capability in source.get("capabilities") or []:
+        kind = (capability.get("type") or "").removeprefix("devices.capabilities.")
+        if kind not in VOICE_CAPABILITIES:
+            continue
+        params = capability.get("parameters") or {}
+        item: dict[str, Any] = {
+            "kind": kind,
+            "instance": params.get("instance"),
+            "name": params.get("name"),
+        }
+        if kind == "color_setting":
+            temperature = params.get("temperature_k") or {}
+            scenes = params.get("scenes") or (params.get("color_scene") or {}).get("scenes")
+            item["color"] = bool(params.get("color_model"))
+            item["white"] = temperature.get("min") != temperature.get("max")
+            item["palette"] = [
+                color["name"] for color in params.get("palette") or [] if color.get("name")
+            ]
+            item["scenes"] = [
+                scene.get("name") or scene.get("id")
+                for scene in scenes or []
+                if scene.get("name") or scene.get("id")
+            ]
+        elif kind == "mode":
+            item["modes"] = [
+                mode.get("name") or mode.get("value")
+                for mode in params.get("modes") or []
+                if mode.get("name") or mode.get("value")
+            ]
+        capabilities.append(item)
+
+    for prop in source.get("properties") or []:
+        kind = (prop.get("type") or "").removeprefix("devices.properties.")
+        if kind not in ("float", "event"):
+            continue
+        params = prop.get("parameters") or {}
+        properties.append(
+            {
+                "kind": kind,
+                "instance": params.get("instance"),
+                "name": params.get("name"),
+                "events": [
+                    event["name"] for event in params.get("events") or [] if event.get("name")
+                ],
+            }
+        )
+    return {"capabilities": capabilities, "properties": properties}
+
+
+def _skills_summary(skills: dict[str, Any]) -> list[str]:
+    """Короткий перечень умений для значков в списке."""
+    kinds: list[str] = []
+
+    def add(kind: str) -> None:
+        if kind not in kinds:
+            kinds.append(kind)
+
+    for capability in skills["capabilities"]:
+        kind = capability["kind"]
+        if kind == "range":
+            add(capability.get("instance") or "range")
+        elif kind == "color_setting":
+            if capability["color"]:
+                add("color")
+            if capability["white"]:
+                add("white")
+            if capability["scenes"]:
+                add("scenes")
+        else:
+            add(kind)
+    for prop in skills["properties"]:
+        add("sensor" if prop["kind"] == "float" else "event")
+    return kinds
+
+
+def _scenarios_of(raw: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Сценарии пользователя и фразы, которыми они запускаются."""
+    result = []
+    for scenario in raw or []:
+        name = scenario.get("name") or ""
+        if HELPER_SCENARIO.match(name) or scenario.get("archived"):
+            continue
+        phrases = [
+            trigger["value"]
+            for trigger in scenario.get("triggers") or []
+            if trigger.get("type") == "scenario.trigger.voice"
+            and isinstance(trigger.get("value"), str)
+        ]
+        result.append(
+            {
+                "id": scenario.get("id"),
+                "name": name,
+                "phrases": phrases,
+                "active": scenario.get("is_active", True),
+            }
+        )
+    return result
+
+
+def _stations(
+    hass: HomeAssistant, flat: list[tuple[dict[str, Any], str | None, str | None]]
+) -> list[dict[str, Any]]:
+    """Станции, через которые можно проверить фразу, с их комнатами в Яндексе."""
+    account = station_entry(hass)
+    speakers: dict[str, tuple[str | None, str | None]] = {}
+    for device, room_name, _room_id in flat:
+        quasar_id = (device.get("quasar_info") or {}).get("device_id")
+        if quasar_id:
+            speakers[quasar_id] = (device.get("name"), room_name)
+
+    found = []
+    for entity in er.async_get(hass).entities.values():
+        if entity.platform != YS_DOMAIN or entity.domain != "media_player":
+            continue
+        if entity.disabled_by:
+            continue
+        if account and entity.config_entry_id != account.entry_id:
+            continue  # Станции другого аккаунта выполнят фразу в чужом доме
+        state = hass.states.get(entity.entity_id)
+        name, room = speakers.get(entity.unique_id, (None, None))
+        found.append(
+            {
+                "entity_id": entity.entity_id,
+                "name": name
+                or (state.attributes.get("friendly_name") if state else None)
+                or entity.entity_id,
+                "room": room,
+                "speaker": entity.unique_id in speakers,
+            }
+        )
+    # Если сопоставить с колонками Яндекса удалось — остальное (ТВ, модули) не нужно
+    if any(item["speaker"] for item in found):
+        found = [item for item in found if item["speaker"]]
+    found.sort(key=lambda item: item["name"])
+    return found
+
+
 def _on_state(device: dict[str, Any]) -> bool | None:
     """Включено ли устройство по данным Яндекса. None — у него нет вкл/выкл."""
     for capability in device.get("capabilities") or []:
@@ -129,22 +307,48 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
 
     semaphore = asyncio.Semaphore(PARALLEL_CONFIG_REQUESTS)
 
-    async def load(device: dict[str, Any]) -> dict[str, Any] | None:
-        async with semaphore:
-            try:
-                return await api.device_config(device["id"])
-            except QuasarError as err:
-                _LOGGER.debug("Карточка %s не прочиталась: %s", device["id"], err)
-                return None
+    async def read(coro, what: str, device_id: str) -> dict[str, Any] | None:
+        try:
+            return await coro
+        except QuasarError as err:
+            _LOGGER.debug("%s %s не прочиталась: %s", what, device_id, err)
+            return None
 
-    configs = await asyncio.gather(*(load(item[0]) for item in flat))
+    async def nothing() -> None:
+        return None
+
+    details: dict[str, tuple[float, dict]] = store_data.setdefault(DATA_DETAILS, {})
+
+    async def detail_of(device_id: str) -> dict[str, Any] | None:
+        cached = details.get(device_id)
+        if cached and time.time() - cached[0] < DETAIL_TTL:
+            return cached[1]
+        detail = await read(api.device(device_id), "Карточка", device_id)
+        if detail:
+            details[device_id] = (time.time(), detail)
+        return detail
+
+    async def load(device: dict[str, Any]) -> tuple[dict | None, dict | None]:
+        # Настройки дают имена и сущность HA, карточка — умения с названиями
+        needs_detail = any(
+            capability.get("type") in DETAIL_CAPABILITIES
+            for capability in device.get("capabilities") or []
+        )
+        async with semaphore:
+            return await asyncio.gather(
+                read(api.device_config(device["id"]), "Настройки", device["id"]),
+                detail_of(device["id"]) if needs_detail else nothing(),
+            )
+
+    loaded = await asyncio.gather(*(load(item[0]) for item in flat))
 
     snapshots: dict[str, Any] = hass.data[DOMAIN][DATA_SNAPSHOTS]
     devices: list[dict[str, Any]] = []
     skill_id: str | None = None
 
-    for (device, room_name, room_id), config in zip(flat, configs, strict=True):
+    for (device, room_name, room_id), (config, detail) in zip(flat, loaded, strict=True):
         config = config or {}
+        skills = _skills_of({**device, **(detail or {})})
         device_type = config.get("device_type") or {}
         external_id = config.get("external_id")
         from_ha = _is_ha_entity(hass, external_id)
@@ -166,6 +370,8 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
                 capability.get("type") == "devices.capabilities.on_off"
                 for capability in (device.get("capabilities") or [])
             ),
+            "skills": _skills_summary(skills),
+            "abilities": skills,
             "on": _on_state(device),
         }
         if from_ha:
@@ -175,7 +381,9 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
                 skill_id = config["skill_id"]
         devices.append(entry)
 
-    hass.data[DOMAIN][DATA_STORE].async_delay_save(lambda: snapshots, 5)
+    hass.data[DOMAIN][DATA_STORE].async_delay_save(
+        lambda: hass.data[DOMAIN][DATA_STORE_DATA], 5
+    )
 
     label = _label_info(hass)
     exposed = {
@@ -183,6 +391,13 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     }
     unexposed = _unexposed_entities(hass, exposed)
 
+    try:
+        scenarios = _scenarios_of(await api.scenarios())
+    except QuasarError as err:
+        _LOGGER.debug("Сценарии не прочитались: %s", err)
+        scenarios = None
+
+    account = station_entry(hass)
     payload = {
         "devices": devices,
         "rooms": [
@@ -194,6 +409,12 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
         "snapshots": snapshots,
         "max_names": MAX_NAMES,
         "skill_id": skill_id,
+        "scenarios": scenarios,
+        "stations": _stations(hass, flat),
+        "account": {
+            "name": account.title if account else None,
+            "several": len(station_entries(hass)) > 1,
+        },
     }
     hass.data[DOMAIN][DATA_CACHE] = {"ts": time.time(), "payload": payload}
     return payload
@@ -211,11 +432,11 @@ def _yaha_can_export(hass: HomeAssistant) -> Callable[[str, State | None], bool]
 
     module = sys.modules.get(f"custom_components.{YAHA_DOMAIN}.device")
     component = hass.data.get(YAHA_DOMAIN)
-    entries = hass.config_entries.async_entries(YAHA_DOMAIN)
-    if module is None or component is None or not entries:
+    entry = yaha_entry(hass)
+    if module is None or component is None or entry is None:
         return by_device_class
     try:
-        entry_data = component.get_entry_data(entries[0])
+        entry_data = component.get_entry_data(entry)
         yaha_device = module.Device
     except Exception:  # noqa: BLE001 — устройство Yandex Smart Home поменялось
         return by_device_class
@@ -305,7 +526,9 @@ async def _reply(hass, connection, msg, coro, remember: str | None = None) -> No
         for device in payload["devices"]:
             if device["id"] == remember and device.get("external_id"):
                 _remember(snapshots, device["external_id"], device, force=True)
-                hass.data[DOMAIN][DATA_STORE].async_delay_save(lambda: snapshots, 2)
+                hass.data[DOMAIN][DATA_STORE].async_delay_save(
+                    lambda: hass.data[DOMAIN][DATA_STORE_DATA], 2
+                )
                 break
     payload = {**payload, "notice": notice}
     connection.send_result(msg["id"], payload)
@@ -572,6 +795,41 @@ async def ws_blink(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "yandex_menu/say",
+        vol.Required("entity_id"): str,
+        vol.Required("text"): vol.All(str, vol.Length(min=1, max=200)),
+    }
+)
+@websocket_api.async_response
+async def ws_say(hass: HomeAssistant, connection, msg) -> None:
+    """Станция выполняет фразу так, будто её сказали вслух."""
+    entity = er.async_get(hass).async_get(msg["entity_id"])
+    if not entity or entity.platform != YS_DOMAIN or entity.domain != "media_player":
+        connection.send_error(msg["id"], "quasar_error", "Это не Яндекс.Станция.")
+        return
+    try:
+        await hass.services.async_call(
+            "media_player",
+            "play_media",
+            {
+                "entity_id": msg["entity_id"],
+                "media_content_id": msg["text"].strip(),
+                "media_content_type": "command",
+            },
+            blocking=True,
+        )
+    except Exception as err:  # noqa: BLE001 — показываем причину пользователю
+        _LOGGER.debug("Станция не приняла фразу: %s", err)
+        connection.send_error(
+            msg["id"], "quasar_error", f"Станция не приняла команду: {err}"
+        )
+        return
+    connection.send_result(msg["id"], {"ok": True})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "yandex_menu/restore",
         vol.Required("device_id"): str,
     }
@@ -622,5 +880,6 @@ def async_register(hass: HomeAssistant) -> None:
         ws_withdraw,
         ws_blink,
         ws_restore,
+        ws_say,
     ):
         websocket_api.async_register_command(hass, command)

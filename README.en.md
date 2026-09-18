@@ -46,6 +46,13 @@ too — lamps have a main and a secondary light role.
   keeps the last good set and offers to restore it with one click.
 - **"Blink" check.** Turns the device on for three seconds — handy when a room has three identical
   lamps and you cannot tell which is which.
+- **What to say to Alice.** Every device shows what it can do and the words for voice commands:
+  brightness, colours, modes, vacuum speed, sensor questions. Any phrase can be tested — a Yandex
+  Station runs it as if it had been spoken.
+- **Room commands and scenarios.** Each room has its light commands, and Yandex scenarios are listed
+  together with the phrases that start them.
+- **Several Yandex accounts.** If Home Assistant has more than one, choose in the options which home
+  the panel works with.
 - **Refresh device list.** The same thing the refresh button does in the Yandex app.
 
 ## Requirements
@@ -107,6 +114,28 @@ Five names is the hard limit. Yandex rejects the sixth, so the panel disables th
 **secondary** responds to its own name or to "turn on the ambient light". Every lamp has the role
 switch.
 
+### What to say to Alice
+
+The icons on the right of a device row show what it can do: on/off, brightness, colour, modes,
+sensor readings. Clicking them opens the editor right at **"What to say to Alice"** with the words
+for each capability. Long lists such as colours are collapsed.
+
+Tap a word to pick it and ▶ to test. The panel shows the full phrase — you can edit it, for example
+to fix the grammatical case of the device name — and a Yandex Station runs it for real. By default
+it uses the Station in the same room and remembers your choice.
+
+Voice control covers only what Yandex knows: it has its own set of colours and light modes. If a
+light strip has a hundred effects, Alice reaches only those Yandex Smart Home maps to Yandex modes.
+
+### Room commands and scenarios
+
+The **"commands"** button next to a room title opens the light commands for that room and for the
+whole home. It also shows which lights answer "Alice, turn on the light" and which respond only to
+their own name.
+
+Below the device list there is a **"Scenarios"** block: your Yandex scenarios with their trigger
+phrases and the same test button.
+
 ### Exposing a device to Alice
 
 Start typing a name or an entity id in the search box — a section with entities Alice doesn't have
@@ -122,8 +151,13 @@ The integration talks to the same private API the Yandex app uses. It has no off
 and Yandex may change it without notice, in which case the panel will need a fix. Nothing here is
 irreversible — everything it does can also be done by hand in the Yandex app.
 
-Device control (on, off, brightness, colour) is intentionally not duplicated: regular Home Assistant
-cards already do that. This panel only covers what is otherwise phone-only.
+The panel is not meant for everyday device control — regular Home Assistant cards do that. The ▶
+button is there to test a phrase, not to replace a switch.
+
+If Home Assistant has several Yandex accounts (several Yandex Station entries) or several Yandex
+Smart Home entries, pick the right ones during setup or later in **Settings → Devices & services →
+Yandex menu → Configure**. Until you choose, the panel uses the first account. The current account
+is shown in the panel header when there is more than one.
 
 ## Troubleshooting
 
@@ -138,6 +172,9 @@ Yandex won't accept those. Bring it back online and press "Refresh device list".
 **A device arrived named "0".** That comes from an empty alias in the Home Assistant entity
 registry. The panel cleans aliases before exposing, but if the device was created earlier, delete
 it in the panel and expose the entity again.
+
+**"The Yandex account selected in the options is no longer connected".** The account was removed
+from Yandex Station. Pick another one in the integration options.
 
 **A Yandex error shown in the panel.** Those texts come from Yandex itself and are displayed as is:
 "this device already has such a name", "too many names for a device" and the like.
