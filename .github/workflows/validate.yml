@@ -7,6 +7,10 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Обоим проверкам хватает чтения репозитория: ничего не пишут и не публикуют.
+permissions:
+  contents: read
+
 jobs:
   hacs:
     name: HACS

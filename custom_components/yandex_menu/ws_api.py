@@ -56,6 +56,9 @@ DETAIL_CAPABILITIES = ("devices.capabilities.color_setting", "devices.capabiliti
 # Карточки кэшируем, чтобы каждое открытие панели не стоило лишних секунд.
 DETAIL_TTL = 600
 
+# Устройство Яндекса с тем, где оно стоит: комната (имя, id) и дом
+Placed = tuple[dict[str, Any], str | None, str | None, str | None]
+
 
 # --------------------------------------------------------------------- helpers
 
@@ -227,21 +230,25 @@ def _scenarios_of(raw: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
                 "name": name,
                 "phrases": phrases,
                 "active": scenario.get("is_active", True),
+                # пустой список — сценарий не привязан к дому, показываем везде
+                "households": list(scenario.get("household_ids") or []),
             }
         )
     return result
 
 
-def _stations(
-    hass: HomeAssistant, flat: list[tuple[dict[str, Any], str | None, str | None]]
-) -> list[dict[str, Any]]:
-    """Станции, через которые можно проверить фразу, с их комнатами в Яндексе."""
+def _stations(hass: HomeAssistant, flat: list[Placed]) -> list[dict[str, Any]]:
+    """Станции, через которые можно проверить фразу, с их домами и комнатами в Яндексе.
+
+    Станция выполняет фразу у себя дома, поэтому панель предлагает только
+    станции того дома, который сейчас открыт.
+    """
     account = station_entry(hass)
-    speakers: dict[str, tuple[str | None, str | None]] = {}
-    for device, room_name, _room_id in flat:
+    speakers: dict[str, tuple[str | None, str | None, str | None]] = {}
+    for device, room_name, _room_id, household_id in flat:
         quasar_id = (device.get("quasar_info") or {}).get("device_id")
         if quasar_id:
-            speakers[quasar_id] = (device.get("name"), room_name)
+            speakers[quasar_id] = (device.get("name"), room_name, household_id)
 
     found = []
     for entity in er.async_get(hass).entities.values():
@@ -252,7 +259,7 @@ def _stations(
         if account and entity.config_entry_id != account.entry_id:
             continue  # Станции другого аккаунта выполнят фразу в чужом доме
         state = hass.states.get(entity.entity_id)
-        name, room = speakers.get(entity.unique_id, (None, None))
+        name, room, household_id = speakers.get(entity.unique_id, (None, None, None))
         found.append(
             {
                 "entity_id": entity.entity_id,
@@ -260,6 +267,7 @@ def _stations(
                 or (state.attributes.get("friendly_name") if state else None)
                 or entity.entity_id,
                 "room": room,
+                "household_id": household_id,
                 "speaker": entity.unique_id in speakers,
             }
         )
@@ -288,6 +296,50 @@ def _snapshot_of(device: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _households_of(
+    raw: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[Placed]]:
+    """Дома, комнаты и устройства из ответа /m/v3/user/devices.
+
+    Комнаты в разных домах могут называться одинаково («Кухня» в квартире и на
+    даче), поэтому у каждой комнаты и устройства запоминаем, в каком они доме.
+    Группы пропускаем: у них нет карточки устройства, панель с ними не работает.
+    """
+    households: list[dict[str, Any]] = []
+    rooms: list[dict[str, Any]] = []
+    flat: list[Placed] = []
+
+    def is_device(item: dict[str, Any]) -> bool:
+        return item.get("item_type", "device") == "device" and bool(item.get("id"))
+
+    for house in raw.get("households") or []:
+        house_id = house.get("id")
+        households.append(
+            {
+                "id": house_id,
+                "name": house.get("name") or "Дом",
+                "current": bool(house.get("is_current")),
+                # дом, которым поделился другой человек: права на правку могут быть урезаны
+                "shared": "sharing_info" in house,
+            }
+        )
+        placed: set[str] = set()
+        for room in house.get("rooms") or []:
+            rooms.append(
+                {"id": room.get("id"), "name": room.get("name"), "household_id": house_id}
+            )
+            for item in room.get("items") or []:
+                if is_device(item) and item["id"] not in placed:
+                    placed.add(item["id"])
+                    flat.append((item, room.get("name"), room.get("id"), house_id))
+        # всё, что не попало ни в одну комнату, — «Без комнаты»
+        for item in house.get("all") or []:
+            if is_device(item) and item["id"] not in placed:
+                placed.add(item["id"])
+                flat.append((item, None, None, house_id))
+    return households, rooms, flat
+
+
 async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any]:
     """Собирает всё, что нужно панели, за один заход."""
     store_data = hass.data[DOMAIN]
@@ -298,12 +350,7 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     api = _api(hass)
     raw = await api.devices()
 
-    flat: list[tuple[dict[str, Any], str | None, str | None]] = []
-    for room in raw.get("rooms") or []:
-        for device in room.get("devices") or []:
-            flat.append((device, room.get("name"), room.get("id")))
-    for device in raw.get("unconfigured_devices") or []:
-        flat.append((device, None, None))
+    households, rooms, flat = _households_of(raw)
 
     semaphore = asyncio.Semaphore(PARALLEL_CONFIG_REQUESTS)
 
@@ -346,7 +393,9 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     devices: list[dict[str, Any]] = []
     skill_id: str | None = None
 
-    for (device, room_name, room_id), (config, detail) in zip(flat, loaded, strict=True):
+    for (device, room_name, room_id, household_id), (config, detail) in zip(
+        flat, loaded, strict=True
+    ):
         config = config or {}
         skills = _skills_of({**device, **(detail or {})})
         device_type = config.get("device_type") or {}
@@ -363,6 +412,7 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
             "type_switchable": bool(device_type.get("switchable")),
             "room": room_name,
             "room_id": room_id,
+            "household_id": household_id,
             "external_id": external_id,
             "from_ha": from_ha,
             "skill_id": config.get("skill_id"),
@@ -400,10 +450,8 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     account = station_entry(hass)
     payload = {
         "devices": devices,
-        "rooms": [
-            {"id": room.get("id"), "name": room.get("name")}
-            for room in (raw.get("rooms") or [])
-        ],
+        "households": households,
+        "rooms": rooms,
         "unexposed": unexposed,
         "label": label,
         "snapshots": snapshots,

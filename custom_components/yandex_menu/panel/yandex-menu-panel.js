@@ -173,6 +173,7 @@ const ASK_WORDS = {
 
 const CHIPS_COLLAPSED = 6;
 const STATION_KEY = "yandex_menu.station";
+const HOUSE_KEY = "yandex_menu.house";
 
 const STYLES = `
   :host {
@@ -210,6 +211,17 @@ const STYLES = `
   }
   header.bar h1 { margin: 0; font-size: 20px; font-weight: 400; }
   .account { font-size: 12.5px; color: var(--muted); background: var(--surface-2); padding: 3px 10px; border-radius: 999px; }
+  .houses { display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 999px; background: var(--surface-2); }
+  .houses[hidden] { display: none; }
+  .houses button {
+    border: 0; background: transparent; padding: 4px 12px; border-radius: 999px;
+    font-size: 13px; color: var(--muted); display: inline-flex; align-items: baseline; gap: 6px;
+  }
+  .houses button:hover { color: var(--primary-text-color); }
+  .houses button.on { background: var(--surface); color: var(--accent); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.14); }
+  .houses .n { font-size: 11.5px; font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .elsewhere { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .elsewhere .chip { font-size: 12.5px; padding: 3px 11px; }
   .grow { flex: 1 1 40px; }
   .search {
     display: flex; align-items: center; gap: 8px;
@@ -218,6 +230,7 @@ const STYLES = `
   .search input { border: 0; background: transparent; outline: none; width: 100%; }
   .icon-only { border: 0; background: transparent; padding: 8px; border-radius: 50%; display: grid; place-items: center; }
   .icon-only:hover { background: var(--surface-2); }
+  .icon-only[hidden] { display: none; }
 
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
@@ -328,6 +341,7 @@ const STYLES = `
   .pick:hover { color: var(--accent); }
   .pick.on { background: rgba(3,169,244,.16); color: var(--accent); font-weight: 500; }
   .chip.more { background: transparent; color: var(--accent); }
+  button.chip.go:hover { color: var(--accent); background: rgba(3,169,244,.14); }
   .say-row {
     display: grid; grid-template-columns: 1fr auto; gap: 5px 10px; align-items: center;
     padding: 10px 0; border-top: 1px solid var(--line);
@@ -391,14 +405,31 @@ class YandexMenuPanel extends HTMLElement {
     this._busy = false;
     this._loaded = false;
     this._room = null; // открыта карточка комнаты вместо устройства
+    // Карточка открывалась сменой поля и следа в истории браузера не оставляла:
+    // аппаратная «назад» на телефоне снимала запись входа в панель и уносила на
+    // дашборд. Теперь под открытой карточкой лежит своя запись: первый «назад»
+    // съедает её и возвращает к списку, второй уводит с панели.
+    this._histCard = false; // наша запись в истории есть
+    this._backRoom = null; // в устройство провалились из комнаты — туда и вернёмся
+    this._listShape = null; // дом и поиск прошлой отрисовки: сменились — прокрутка наверх
+    this._onPop = this._onPop.bind(this); // ссылка одна: по ней же отписываемся
     this._picked = {}; // выбранный чип в строке фраз
     this._expanded = {}; // строки, где показаны все значения
     this._sayRows = {}; // строки фраз последней отрисовки, для кнопки «проверить»
     this._scrollToSkills = false;
+    // Выбранная Станция — своя в каждом доме. Раньше хранилась одной строкой.
+    this._stationByHouse = {};
+    this._house = null;
     try {
-      this._station = localStorage.getItem(STATION_KEY);
+      const saved = localStorage.getItem(STATION_KEY);
+      if (saved) this._stationByHouse = saved.startsWith("{") ? JSON.parse(saved) : { "": saved };
     } catch (err) {
-      this._station = null;
+      this._stationByHouse = {};
+    }
+    try {
+      this._house = localStorage.getItem(HOUSE_KEY);
+    } catch (err) {
+      this._house = null;
     }
   }
 
@@ -410,15 +441,134 @@ class YandexMenuPanel extends HTMLElement {
       this._load(true);
       return;
     }
+    this._syncMenu();
     this._refreshLit();
   }
 
   set narrow(value) {
     this._narrow = value;
+    this._syncMenu();
   }
 
   connectedCallback() {
+    // Ушли с панели и вернулись «назад»: элемент Home Assistant пересоздаёт, а
+    // наша запись в истории цела. Восстанавливаем по ней, что было открыто, —
+    // иначе на экране список, в истории карточка, и «назад» тратится впустую.
+    const card = history.state && history.state.ymCard;
+    this._histCard = Boolean(card);
+    if (card) {
+      this._selected = card.device || null;
+      this._room = card.room || null;
+      this._backRoom = card.fromRoom || null;
+    }
     if (!this.shadowRoot.firstChild) this._render();
+    else if (card) this._render();
+    window.addEventListener("popstate", this._onPop);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("popstate", this._onPop);
+    clearTimeout(this._toastTimer);
+    // Свою запись здесь не снимаем: history.back() посреди чужой навигации
+    // отменил бы переход, который пользователь только что сделал.
+  }
+
+  /* ---------------------------------------------------------------- история */
+
+  /** Открытая карточка = одна запись в истории браузера.
+
+      Адрес не меняем: роутер Home Assistant сверяет путь и запись с тем же путём
+      пропускает мимо себя — так же устроены его собственные диалоги. Ключи dialog,
+      opensDialog и dialogData заняты его диалог-менеджером, поэтому своё кладём
+      под ymCard; from — то, чем он отличает «есть куда вернуться» от «некуда». */
+  _openCard() {
+    const card = this._room
+      ? { room: this._room }
+      : { device: this._selected, fromRoom: this._backRoom || null };
+    // Вторая проверка — на случай, когда крестик уже отправил history.back(), а
+    // ответ ещё не пришёл: запись пока наша, и второй класть нельзя.
+    if (this._histCard || (history.state && history.state.ymCard)) {
+      // карточка сменилась — правим свою запись, второй не кладём
+      if (history.state && history.state.ymCard)
+        history.replaceState({ ...history.state, ymCard: card }, "");
+      this._histCard = true;
+      return;
+    }
+    history.pushState({ from: location.pathname, ymCard: card }, "");
+    this._histCard = true;
+  }
+
+  /** Закрытие не кнопкой «назад»: крестик, смена дома, удаление устройства. */
+  _closeCard() {
+    this._selected = null;
+    this._room = null;
+    this._backRoom = null;
+    this._message = null;
+    this._dropCardHistory();
+  }
+
+  _dropCardHistory() {
+    if (!this._histCard) return;
+    this._histCard = false; // метку снимаем до back(): свой же popstate тогда ничего не делает
+    // Снимаем только свою запись и только пока панель на экране: наверху может
+    // лежать чужая (диалог HA поверх панели), а уйти с панели человек мог сам.
+    // Оставшаяся под чужой записью наша — не беда: вернувшись на неё, панель
+    // поднимет карточку из состояния, а _dropGoneCard закроет, если та мертва.
+    if (this.isConnected && history.state && history.state.ymCard) history.back();
+  }
+
+  /** Карточка открыта, а устройства или комнаты уже нет: их могли удалить в
+      приложении Яндекса, пока карточка висела. Запись снимаем здесь, иначе
+      «назад» потратится на экран, которого не видно. */
+  _dropGoneCard() {
+    if (!this._data) return;
+    if (this._selected) {
+      const device = this._device(this._selected);
+      // тот же тест, что и в _renderDevicePanel: карточка из чужого дома не показывается
+      if (!device || !this._inHouse(device)) this._closeCard();
+      return;
+    }
+    if (this._room && !this._houseDevices.some((device) => device.room === this._room))
+      this._closeCard();
+  }
+
+  /** «Назад». Чужую запись не трогаем — это уход с панели, им занимается HA. */
+  _onPop() {
+    // Приземлились на свою же запись — значит закрывали не карточку. Так Home
+    // Assistant снимает свои диалоги: он тоже делает history.back(), и без этой
+    // проверки его крестик схлопывал бы заодно и нашу карточку. Заодно сюда
+    // приходит кнопка «вперёд» — возвращаем то, что в записи и записано.
+    // До HA 2025.2 его диалог затирал чужое состояние целиком, поэтому там
+    // закрытие диалога заодно закроет и карточку — неприятно, но не страшно.
+    if (history.state && history.state.ymCard) {
+      const card = history.state.ymCard;
+      const device = card.device || null;
+      const room = card.room || null;
+      this._histCard = true;
+      this._backRoom = card.fromRoom || null;
+      if (device !== this._selected || room !== this._room) {
+        this._selected = device;
+        this._room = room;
+        this._dropGoneCard(); // пока запись лежала, устройство могли удалить
+        this._render();
+      }
+      return;
+    }
+    if (!this._histCard) return; // ушли с чужой записи — это уход с панели
+    this._histCard = false;
+    this._message = null;
+    if (this._backRoom) {
+      // в устройство провалились из карточки комнаты: возвращаемся в неё, и под
+      // ней снова нужна запись, иначе следующий «назад» уйдёт мимо списка
+      this._selected = null;
+      this._room = this._backRoom;
+      this._backRoom = null;
+      this._openCard();
+    } else {
+      this._selected = null;
+      this._room = null;
+    }
+    this._render();
   }
 
   /* ------------------------------------------------------------- транспорт */
@@ -431,6 +581,8 @@ class YandexMenuPanel extends HTMLElement {
     try {
       this._data = await this._call("yandex_menu/list", { force });
       this._error = null;
+      this._syncHouse();
+      this._dropGoneCard();
     } catch (err) {
       this._error = err && err.message ? err.message : String(err);
     }
@@ -442,6 +594,8 @@ class YandexMenuPanel extends HTMLElement {
     this._render();
     try {
       this._data = await this._call(type, payload);
+      this._syncHouse();
+      this._dropGoneCard();
       this._message = null;
       const notice = this._data && this._data.notice;
       if (notice) this._toast(notice);
@@ -474,6 +628,69 @@ class YandexMenuPanel extends HTMLElement {
 
   _device(id) {
     return this._devices.find((item) => item.id === id) || null;
+  }
+
+  get _houses() {
+    return (this._data && this._data.households) || [];
+  }
+
+  /** Открытый дом. null — дом один, делить нечего, и панель выглядит как раньше. */
+  get _houseId() {
+    const houses = this._houses;
+    if (houses.length < 2) return null;
+    const open =
+      houses.find((house) => house.id === this._house) ||
+      houses.find((house) => house.current) ||
+      houses[0];
+    return open.id;
+  }
+
+  /** Закрепляем открытый дом после каждой загрузки.
+
+      Иначе смена основного дома в приложении Яндекса молча перекинула бы панель
+      в другой дом, а открытая карточка проверяла бы фразы чужой Станцией. */
+  _syncHouse() {
+    const houses = this._houses;
+    if (houses.length < 2 || houses.some((house) => house.id === this._house)) return;
+    if (this._house && (this._selected || this._room)) {
+      // дом, который был открыт, пропал — его карточки больше не к месту
+      this._closeCard();
+    }
+    this._house = (houses.find((house) => house.current) || houses[0]).id;
+  }
+
+  _inHouse(item, houseId = this._houseId) {
+    return !houseId || !item.household_id || item.household_id === houseId;
+  }
+
+  /** Устройства открытого дома. */
+  get _houseDevices() {
+    return this._devices.filter((device) => this._inHouse(device));
+  }
+
+  _openHouse(id) {
+    if (id === this._houseId) return;
+    this._house = id;
+    this._closeCard(); // карточка была из прежнего дома — и запись под ней тоже
+    try {
+      localStorage.setItem(HOUSE_KEY, id);
+    } catch (err) {
+      // без localStorage выбор проживёт до перезагрузки страницы
+    }
+    this._render();
+    const list = this.shadowRoot.getElementById("list");
+    if (list) list.scrollTop = 0;
+  }
+
+  /** Блок «Отдать в Алису» — там, куда навык Home Assistant кладёт устройства. */
+  _offerHere(houseId = this._houseId) {
+    if (!houseId) return true;
+    const withHa = new Set(
+      this._devices.filter((device) => device.from_ha).map((device) => device.household_id)
+    );
+    if (withHa.size) return withHa.has(houseId);
+    const current = this._houses.find((house) => house.current) || this._houses[0];
+    return current.id === houseId;
   }
 
   _iconFor(device) {
@@ -670,21 +887,31 @@ class YandexMenuPanel extends HTMLElement {
     return rows;
   }
 
+  /** Станции открытого дома: Станция выполняет фразу у себя дома, чужой дом не тронет. */
+  get _stations() {
+    return ((this._data && this._data.stations) || []).filter((item) => this._inHouse(item));
+  }
+
   _stationFor(room) {
-    const stations = (this._data && this._data.stations) || [];
+    const stations = this._stations;
     if (!stations.length) return null;
+    const chosen = this._stationByHouse[this._houseId || ""] || this._stationByHouse[""];
     return (
-      stations.find((item) => item.entity_id === this._station) ||
+      stations.find((item) => item.entity_id === chosen) ||
       stations.find((item) => room && item.room === room) ||
       stations[0]
     );
   }
 
   _stationPicker(room) {
-    const stations = (this._data && this._data.stations) || [];
+    const stations = this._stations;
     const current = this._stationFor(room);
     if (!current)
-      return `<div class="msg info">Чтобы проверять фразы, нужна Яндекс.Станция в Home Assistant.</div>`;
+      return `<div class="msg info">${
+        this._houseId
+          ? "Чтобы проверять фразы, нужна Яндекс.Станция из этого дома в Home Assistant."
+          : "Чтобы проверять фразы, нужна Яндекс.Станция в Home Assistant."
+      }</div>`;
     if (stations.length === 1)
       return `<div class="station">Проверка через ${this._esc(current.name)}</div>`;
     const options = stations
@@ -801,8 +1028,9 @@ class YandexMenuPanel extends HTMLElement {
     if (device.names.some((item) => item.toLowerCase() === lower))
       return { level: "error", text: "Такое имя у устройства уже есть." };
 
+    // Алиса путает имена только внутри одного дома
     for (const other of this._devices) {
-      if (other.id === device.id) continue;
+      if (other.id === device.id || !this._inHouse(other, device.household_id)) continue;
       for (const otherName of other.names) {
         const on = String(otherName).toLowerCase();
         if (on === lower)
@@ -845,11 +1073,12 @@ class YandexMenuPanel extends HTMLElement {
       layout.className = "layout";
       layout.innerHTML = `
         <header class="bar">
-          <button class="icon-only" id="menu" title="Меню">${this._svg(
+          <button class="icon-only" id="menu" title="Меню" hidden>${this._svg(
             "M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"
           )}</button>
           <h1>Яндекс меню</h1>
           <span class="account" id="account" title="Аккаунт Яндекса. Сменить: настройки интеграции" hidden></span>
+          <nav class="houses" id="houses" aria-label="Дома" hidden></nav>
           <div class="grow"></div>
           <label class="search">
             ${this._svg(
@@ -878,8 +1107,45 @@ class YandexMenuPanel extends HTMLElement {
       account.hidden = !(info && info.several && info.name);
       account.textContent = info && info.name ? info.name : "";
     }
+    this._renderHouses();
+    this._syncMenu();
     const layout = root.querySelector(".layout");
     if (layout) layout.classList.toggle("busy", this._busy);
+  }
+
+  /** Кнопка «меню» нужна, только когда боковое меню Home Assistant не на экране:
+      на телефоне и когда его спрятали совсем. На широком экране она повторяла бы
+      кнопку в самом меню — по этому же правилу Home Assistant показывает свою.
+      Кнопка рисуется скрытой, поэтому до первого hass она не мелькает. */
+  _syncMenu() {
+    const button = this.shadowRoot.getElementById("menu");
+    if (!button) return;
+    const hass = this._hass;
+    const needed = this._narrow || (hass && hass.dockedSidebar === "always_hidden");
+    button.hidden = !needed || Boolean(hass && hass.kioskMode);
+  }
+
+  /** Вкладки домов — только когда на аккаунте их несколько. */
+  _renderHouses() {
+    const host = this.shadowRoot.getElementById("houses");
+    if (!host) return;
+    const houseId = this._houseId;
+    host.hidden = !houseId;
+    if (!houseId) {
+      host.innerHTML = "";
+      return;
+    }
+    host.innerHTML = this._houses
+      .map((house) => {
+        const count = this._devices.filter((device) => device.household_id === house.id).length;
+        const title = house.shared ? "Дом, которым с вами поделились" : "";
+        return `<button data-house="${this._esc(house.id)}" class="${house.id === houseId ? "on" : ""}"${
+          title ? ` title="${title}"` : ""
+        } aria-pressed="${house.id === houseId}">${this._esc(house.name)}${
+          house.shared ? " · общий" : ""
+        }<span class="n">${count}</span></button>`;
+      })
+      .join("");
   }
 
   _svg(path, size = 20) {
@@ -896,6 +1162,11 @@ class YandexMenuPanel extends HTMLElement {
   _renderList() {
     const host = this.shadowRoot.getElementById("list");
     if (!host) return;
+    // Список переписывается целиком, поэтому прокрутку держим руками: закрыв
+    // карточку, человек должен оказаться там, где нажал на лампу. А вот при
+    // смене дома или поиска список уже другой — его правильно показать сверху.
+    const shape = `${this._houseId || ""}|${this._query}`;
+    const keepScroll = shape === this._listShape ? host.scrollTop : 0;
 
     if (this._error) {
       host.innerHTML = `<div class="fatal">${this._esc(this._error)}</div>`;
@@ -911,9 +1182,11 @@ class YandexMenuPanel extends HTMLElement {
       !query ||
       (device.names.join(" ") + " " + (device.external_id || "")).toLowerCase().includes(query);
 
+    const houseId = this._houseId;
+    const devices = this._houseDevices;
     const rooms = [];
     const seen = new Set();
-    for (const device of this._devices) {
+    for (const device of devices) {
       const room = device.room || "Без комнаты";
       if (!seen.has(room)) {
         seen.add(room);
@@ -922,8 +1195,29 @@ class YandexMenuPanel extends HTMLElement {
     }
 
     let html = "";
+    if (query && houseId) {
+      // поиск идёт по открытому дому, но находки в других домах не прячем
+      const elsewhere = this._houses
+        .filter((house) => house.id !== houseId)
+        .map((house) => [
+          house,
+          this._devices.filter((device) => device.household_id === house.id && match(device)).length,
+        ])
+        .filter(([, count]) => count);
+      if (elsewhere.length)
+        html += `<div class="elsewhere">Нашлось и в других домах:${elsewhere
+          .map(
+            ([house, count]) =>
+              `<button class="chip go" data-house="${this._esc(house.id)}">${this._esc(house.name)} · ${count}</button>`
+          )
+          .join("")}</div>`;
+    }
+    if (!devices.length && houseId && !query) {
+      const house = this._houses.find((item) => item.id === houseId);
+      html += `<div class="empty">В доме «${this._esc(house.name)}» пока нет устройств.</div>`;
+    }
     for (const room of rooms) {
-      const items = this._devices.filter(
+      const items = devices.filter(
         (device) => (device.room || "Без комнаты") === room && match(device)
       );
       if (!items.length) continue;
@@ -963,7 +1257,9 @@ class YandexMenuPanel extends HTMLElement {
     }
 
     const scenarios = (this._data.scenarios || []).filter(
-      (item) => !query || (item.name + " " + item.phrases.join(" ")).toLowerCase().includes(query)
+      (item) =>
+        (!houseId || !(item.households || []).length || item.households.includes(houseId)) &&
+        (!query || (item.name + " " + item.phrases.join(" ")).toLowerCase().includes(query))
     );
     if (scenarios.length) {
       const station = this._stationFor(null);
@@ -995,9 +1291,18 @@ class YandexMenuPanel extends HTMLElement {
       html += `</div></section>`;
     }
 
-    const unexposed = (this._data.unexposed || []).filter(
+    const offer = this._offerHere();
+    const matching = (this._data.unexposed || []).filter(
       (item) => !query || (item.name + " " + item.entity_id).toLowerCase().includes(query)
     );
+    const unexposed = offer ? matching : [];
+    // Сущности Home Assistant приезжают в один дом — тот, где живёт навык. В остальных
+    // домах раздел просто пропадал бы, и было бы непонятно, куда за ним идти.
+    const elsewhere = offer || !matching.length ? null : this._houses.find((house) => this._offerHere(house.id));
+    if (elsewhere && query)
+      html += `<div class="elsewhere">Отдать в Алису из Home Assistant можно в доме:<button class="chip go" data-house="${this._esc(
+        elsewhere.id
+      )}">${this._esc(elsewhere.name)} · ${matching.length}</button></div>`;
     if (query && unexposed.length) {
       html += `<section><div class="room-head"><h2>Есть в Home Assistant, но не отдано в Алису</h2><span class="count">${unexposed.length}</span></div><div class="card">`;
       for (const item of unexposed.slice(0, 40)) {
@@ -1012,7 +1317,15 @@ class YandexMenuPanel extends HTMLElement {
         </div>`;
       }
       html += `</div></section>`;
-    } else if (!query) {
+    } else if (!query && elsewhere) {
+      // тот же заголовок, что и в доме, где раздел работает: иначе строка висит без подписи
+      html += `<section><div class="room-head"><h2>Отдать в Алису</h2></div><div class="card"><div class="empty">
+        Сущности Home Assistant приезжают в дом «${this._esc(elsewhere.name)}» — откройте его, чтобы отдать.
+        <div class="elsewhere" style="margin-top:10px;justify-content:center"><button class="chip go" data-house="${this._esc(
+          elsewhere.id
+        )}">${this._esc(elsewhere.name)} · ${matching.length}</button></div>
+      </div></div></section>`;
+    } else if (!query && offer) {
       html += `<section><div class="room-head"><h2>Отдать в Алису</h2></div><div class="card"><div class="empty">
         Начните вводить название или сущность в поиске — сущности Home Assistant, которых ещё нет в Алисе, появятся здесь.
         ${
@@ -1026,11 +1339,39 @@ class YandexMenuPanel extends HTMLElement {
     }
 
     host.innerHTML = html || `<div class="empty">Ничего не нашлось.</div>`;
+    host.scrollTop = keepScroll;
+    this._listShape = shape;
   }
 
   _renderPanel() {
     const host = this.shadowRoot.getElementById("panel");
     if (!host) return;
+    // Карточку восстановили из истории, а список ещё в пути: Яндекс отвечает
+    // секунды. Без заглушки человек видел бы пустой экран и не понимал, что
+    // «назад» ему закрывать.
+    if (!this._data && (this._selected || this._room)) {
+      if (this._error) {
+        // список не пришёл вовсе — ошибку видно в самом списке, карточке нечего показать
+        host.hidden = true;
+        host.innerHTML = "";
+        host.dataset.owner = "";
+        return;
+      }
+      host.hidden = false;
+      host.dataset.owner = "";
+      host.innerHTML = `
+        <div class="panel-head">
+          <div>
+            <h3>Читаю Яндекс-дом…</h3>
+            <div class="entity">карточка откроется, как придёт список</div>
+          </div>
+          <button class="icon-only" id="close" title="Закрыть" style="margin-left:auto">${this._svg(
+            "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
+            20
+          )}</button>
+        </div>`;
+      return;
+    }
     // Перерисовка той же карточки не должна сбрасывать прокрутку
     const owner = this._room ? `room:${this._room}` : this._selected || "";
     const body = host.querySelector(".panel-body");
@@ -1052,9 +1393,14 @@ class YandexMenuPanel extends HTMLElement {
 
   _renderRoomPanel(host) {
     const room = this._room;
-    const devices = this._devices.filter((device) => device.room === room);
+    const devices = this._houseDevices.filter((device) => device.room === room);
     if (!devices.length) {
-      this._room = null;
+      // Список ещё не пришёл — карточку восстановили из истории, ей просто нечего
+      // показать; закрывать её здесь значило бы стереть то, что человек открывал.
+      if (this._data) {
+        this._room = null;
+        this._dropCardHistory(); // карточка ушла без клика — запись под ней тоже
+      }
       host.hidden = true;
       host.innerHTML = "";
       return;
@@ -1104,7 +1450,9 @@ class YandexMenuPanel extends HTMLElement {
   }
 
   _renderDevicePanel(host) {
-    const device = this._device(this._selected);
+    const found = this._device(this._selected);
+    // карточка из другого дома не показывается: Станции и комнаты в ней были бы чужие
+    const device = found && this._inHouse(found) ? found : null;
     if (!device) {
       host.hidden = true;
       host.innerHTML = "";
@@ -1147,7 +1495,9 @@ class YandexMenuPanel extends HTMLElement {
       ? `<div class="msg info">Занято ${limit} имён из ${limit} — это потолок Яндекса.</div>`
       : "";
 
+    // Переносить можно только в комнату своего дома
     const rooms = (this._data.rooms || [])
+      .filter((room) => this._inHouse(room, device.household_id))
       .map(
         (room) =>
           `<option value="${this._esc(room.id)}"${room.id === device.room_id ? " selected" : ""}>${this._esc(
@@ -1269,6 +1619,11 @@ class YandexMenuPanel extends HTMLElement {
       this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
     });
 
+    root.getElementById("houses").addEventListener("click", (event) => {
+      const house = event.target.closest("[data-house]");
+      if (house) this._openHouse(house.getAttribute("data-house"));
+    });
+
     root.getElementById("q").addEventListener("input", (event) => {
       this._query = event.target.value;
       this._renderList();
@@ -1280,12 +1635,23 @@ class YandexMenuPanel extends HTMLElement {
 
     root.getElementById("list").addEventListener("click", (event) => {
       if (this._handleSayClick(event)) return;
+      const house = event.target.closest("[data-house]");
+      if (house) {
+        this._openHouse(house.getAttribute("data-house"));
+        return;
+      }
       const roomButton = event.target.closest("[data-room]");
       if (roomButton) {
         const room = roomButton.getAttribute("data-room");
-        this._room = this._room === room ? null : room;
-        this._selected = null;
-        this._message = null;
+        if (this._room === room) {
+          this._closeCard(); // повторный клик закрывает — парных записей не копим
+        } else {
+          this._room = room;
+          this._selected = null;
+          this._backRoom = null;
+          this._message = null;
+          this._openCard();
+        }
         this._render();
         return;
       }
@@ -1293,8 +1659,10 @@ class YandexMenuPanel extends HTMLElement {
       if (row) {
         this._selected = row.getAttribute("data-id");
         this._room = null;
+        this._backRoom = null;
         this._scrollToSkills = Boolean(event.target.closest(".skills"));
         this._message = null;
+        this._openCard();
         this._render();
         return;
       }
@@ -1312,9 +1680,7 @@ class YandexMenuPanel extends HTMLElement {
 
     panel.addEventListener("click", (event) => {
       if (event.target.closest("#close")) {
-        this._selected = null;
-        this._room = null;
-        this._message = null;
+        this._closeCard();
         this._render();
         return;
       }
@@ -1323,9 +1689,11 @@ class YandexMenuPanel extends HTMLElement {
 
       const open = event.target.closest("[data-open]");
       if (open) {
+        this._backRoom = this._room; // пришли из комнаты — «назад» вернёт в неё
         this._selected = open.getAttribute("data-open");
         this._room = null;
         this._message = null;
+        this._openCard();
         this._render();
         return;
       }
@@ -1396,23 +1764,23 @@ class YandexMenuPanel extends HTMLElement {
           )
         )
           return;
-        this._selected = null;
+        this._closeCard();
         this._act("yandex_menu/withdraw", { device_id: device.id });
         return;
       }
 
       if (event.target.closest("#delete")) {
         if (!confirm(`Удалить «${device.names[0]}» из Яндекс-дома? Это необратимо.`)) return;
-        this._selected = null;
+        this._closeCard();
         this._act("yandex_menu/delete_device", { device_id: device.id }, "Устройство удалено");
       }
     });
 
     panel.addEventListener("change", (event) => {
       if (event.target.id === "station") {
-        this._station = event.target.value;
+        this._stationByHouse[this._houseId || ""] = event.target.value;
         try {
-          localStorage.setItem(STATION_KEY, this._station);
+          localStorage.setItem(STATION_KEY, JSON.stringify(this._stationByHouse));
         } catch (err) {
           // без localStorage выбор проживёт до перезагрузки страницы
         }

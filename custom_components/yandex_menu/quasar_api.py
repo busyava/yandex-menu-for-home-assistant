@@ -84,8 +84,12 @@ class QuasarApi:
     # ------------------------------------------------------------------ чтение
 
     async def devices(self) -> dict[str, Any]:
-        """Комнаты, устройства, сценарии и колонки одним ответом."""
-        return await self._request("get", "/m/user/devices")
+        """Дома, их комнаты и устройства одним ответом.
+
+        Старый /m/user/devices сваливает комнаты всех домов в один список и не
+        говорит, где чья, поэтому берём v3 — там всё разложено по домам.
+        """
+        return await self._request("get", "/m/v3/user/devices")
 
     async def device_config(self, device_id: str) -> dict[str, Any]:
         """Карточка устройства: имена, комната, роль, привязанная сущность HA."""
