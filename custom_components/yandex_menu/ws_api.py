@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import itertools
 import logging
 import re
 import sys
@@ -20,13 +21,22 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
-from .accounts import station_entries, station_entry, yaha_entries, yaha_entry
+from .accounts import (
+    account_key,
+    station_entries,
+    station_entry,
+    yaha_entries,
+    yaha_entry,
+)
 from .const import (
     CACHE_TTL,
     CONDITIONAL_DOMAINS,
     DATA_API,
     DATA_CACHE,
     DATA_DETAILS,
+    DATA_SAVED,
+    DATA_SAVED_STORE,
+    DATA_SAVED_TURN,
     DATA_SNAPSHOTS,
     DATA_STORE,
     DATA_STORE_DATA,
@@ -55,6 +65,10 @@ DETAIL_CAPABILITIES = ("devices.capabilities.color_setting", "devices.capabiliti
 # Умения почти не меняются, а Яндекс.Станция держит паузу 0,2 с между запросами.
 # Карточки кэшируем, чтобы каждое открытие панели не стоило лишних секунд.
 DETAIL_TTL = 600
+
+# Сборки нумеруются по порядку запуска: какой список новее, решаем по номеру,
+# а не по часам — часы могут и прыгнуть.
+_TURNS = itertools.count(1)
 
 # Устройство Яндекса с тем, где оно стоит: комната (имя, id) и дом
 Placed = tuple[dict[str, Any], str | None, str | None, str | None]
@@ -347,6 +361,8 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
     if use_cache and cache and time.time() - cache["ts"] < CACHE_TTL:
         return cache["payload"]
 
+    turn = next(_TURNS)
+    owner = account_key(hass)
     api = _api(hass)
     raw = await api.devices()
 
@@ -465,7 +481,30 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
         },
     }
     hass.data[DOMAIN][DATA_CACHE] = {"ts": time.time(), "payload": payload}
+    _save_list(hass, payload, turn, owner)
     return payload
+
+
+def _save_list(
+    hass: HomeAssistant, payload: dict[str, Any], turn: int, owner: str
+) -> None:
+    """Запоминаем список, чтобы следующее открытие панели показало его сразу.
+
+    Сборка идёт секунды, и за это время многое успевает смениться. Две сборки
+    могут идти внахлёст: панель обновляет список, а человек тем временем
+    переименовал лампу, — начатая раньше может закончиться позже, и её список
+    уже старый. Могли сменить аккаунт или удалить интеграцию. Во всех этих
+    случаях список не запоминаем.
+    """
+    data = hass.data[DOMAIN]
+    store = data.get(DATA_SAVED_STORE)
+    if store is None or owner != account_key(hass):
+        return
+    if turn < data.get(DATA_SAVED_TURN, 0):
+        return
+    data[DATA_SAVED_TURN] = turn
+    data[DATA_SAVED] = {"account": owner, "ts": time.time(), "payload": payload}
+    store.async_delay_save(lambda: data[DATA_SAVED], 10)
 
 
 def _yaha_can_export(hass: HomeAssistant) -> Callable[[str, State | None], bool]:
@@ -600,6 +639,22 @@ async def ws_list(hass: HomeAssistant, connection, msg) -> None:
         connection.send_error(msg["id"], "quasar_error", str(err))
         return
     connection.send_result(msg["id"], payload)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "yandex_menu/list_saved"})
+@callback
+def ws_list_saved(hass: HomeAssistant, connection, msg) -> None:
+    """Последний прочитанный список — сразу, без похода в Яндекс.
+
+    Панель показывает его, пока в фоне собирается свежий. Ничего не запомнено
+    (первое открытие, сменили аккаунт) — ответ пустой, и панель просто ждёт.
+    """
+    saved = hass.data.get(DOMAIN, {}).get(DATA_SAVED)
+    if not saved:
+        connection.send_result(msg["id"], None)
+        return
+    connection.send_result(msg["id"], {**saved["payload"], "saved_at": saved["ts"]})
 
 
 @websocket_api.require_admin
@@ -917,6 +972,7 @@ async def ws_restore(hass: HomeAssistant, connection, msg) -> None:
 def async_register(hass: HomeAssistant) -> None:
     for command in (
         ws_list,
+        ws_list_saved,
         ws_name_add,
         ws_name_delete,
         ws_name_primary,

@@ -18,6 +18,8 @@ from .const import (
     DATA_API,
     DATA_CACHE,
     DATA_DETAILS,
+    DATA_SAVED,
+    DATA_SAVED_STORE,
     DATA_SNAPSHOTS,
     DATA_STORE,
     DATA_STORE_DATA,
@@ -28,6 +30,7 @@ from .const import (
     PANEL_STATIC_URL,
     PANEL_TITLE,
     PANEL_URL_PATH,
+    SAVED_STORAGE_KEY,
     STORAGE_KEY,
     STORAGE_VERSION,
     VERSION,
@@ -55,6 +58,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data[DATA_SNAPSHOTS] = stored["accounts"].setdefault(account_key(hass), {})
     data[DATA_CACHE] = None
     data[DATA_DETAILS] = {}  # после смены аккаунта чужие карточки не нужны
+
+    # Хранилище списка одно на всё время работы HA. После перезагрузки записи
+    # память свежее диска: отложенная запись могла ещё не дойти до файла.
+    saved_store: Store | None = data.get(DATA_SAVED_STORE)
+    if saved_store is None:
+        saved_store = Store(hass, STORAGE_VERSION, SAVED_STORAGE_KEY)
+        data[DATA_SAVED_STORE] = saved_store
+        saved = await saved_store.async_load()
+    else:
+        saved = data.get(DATA_SAVED)
+    # Список другого аккаунта не показываем: после смены аккаунта ждём свежий
+    data[DATA_SAVED] = (
+        saved if saved and saved.get("account") == account_key(hass) else None
+    )
 
     if not data.get(DATA_WS_REGISTERED):
         ws_api.async_register(hass)
@@ -94,10 +111,29 @@ async def _async_register_panel(hass: HomeAssistant, entry: ConfigEntry) -> None
                 "module_url": f"{PANEL_STATIC_URL}/{PANEL_JS}?v={VERSION}",
                 "embed_iframe": False,
                 "trust_external": False,
+                # Вырезы экрана панель обходит сама: шапка заходит под часы, а
+                # карточка на телефоне открыта поверх всего экрана. HA до 2026.8
+                # ключа не знает, но и отступов сам не делает — там работает то же.
+                "handle_safe_area": True,
             }
         },
         update=True,
     )
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Интеграцию удалили: сохранённый список больше некому показывать.
+
+    Слепки остаются — вернёте интеграцию, и они снова пригодятся.
+    """
+    data = hass.data.get(DOMAIN, {})
+    data[DATA_SAVED] = None
+    # Хранилище забираем: сборка, которая ещё идёт, его не найдёт и файл не
+    # вернёт. А тот же экземпляр снимет и свою отложенную запись.
+    store: Store = data.pop(DATA_SAVED_STORE, None) or Store(
+        hass, STORAGE_VERSION, SAVED_STORAGE_KEY
+    )
+    await store.async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

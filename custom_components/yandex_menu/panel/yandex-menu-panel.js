@@ -31,6 +31,10 @@ const ICONS = {
   other:
     "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4Z",
   play: "M8,5.14V19.14L19,12.14L8,5.14Z",
+  sync:
+    "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z",
+  syncAlert:
+    "M11,13H13V7H11M21,4H15V10L17.24,7.76C18.32,8.85 19,10.34 19,12C19,14.61 17.33,16.83 15,17.65V19.74C18.45,18.85 21,15.73 21,12C21,9.79 20.09,7.8 18.64,6.36M11,17H13V15H11M3,12C3,14.21 3.91,16.2 5.36,17.64L3,20H9V14L6.76,16.24C5.68,15.15 5,13.66 5,12C5,9.39 6.67,7.17 9,6.35V4.26C5.55,5.15 3,8.27 3,12Z",
   voice:
     "M9,5A4,4 0 0,1 13,9A4,4 0 0,1 9,13A4,4 0 0,1 5,9A4,4 0 0,1 9,5M9,15C11.67,15 17,16.34 17,19V21H1V19C1,16.34 6.33,15 9,15M16.76,5.36C18.78,7.56 18.78,10.61 16.76,12.63L15.08,10.94C15.92,9.76 15.92,8.23 15.08,7.05L16.76,5.36M20.07,2C24,6.05 23.97,12.11 20.07,16L18.44,14.37C21.21,11.19 21.21,6.65 18.44,3.63L20.07,2Z",
   scenario:
@@ -178,6 +182,7 @@ const HOUSE_KEY = "yandex_menu.house";
 const STYLES = `
   :host {
     display: block;
+    box-sizing: border-box;
     height: 100vh;
     background: var(--primary-background-color, #f5f6f8);
     color: var(--primary-text-color, #212121);
@@ -195,6 +200,18 @@ const STYLES = `
     --ok: var(--success-color, #43a047);
     --lit: var(--state-light-active-color, var(--state-active-color, #ff9800));
     --mono: ui-monospace, SFMono-Regular, "Roboto Mono", Menlo, monospace;
+    /* Вырезы экрана: часы и «чёлка» сверху, полоска «домой» снизу. Home Assistant
+       отдаёт их своими переменными (приложение подставляет свои значения), без
+       них берём у браузера. */
+    --safe-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+    --safe-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+    --safe-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+    --safe-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+    /* Сверху отступ берёт шапка, снизу — список и карточка: так их цвет доходит
+       до края экрана. Сбоку вырез может уже прикрывать боковое меню HA — тогда
+       он не наш. */
+    padding: 0 var(--safe-area-content-inset-right, var(--safe-right)) 0
+      var(--safe-area-content-inset-left, var(--safe-left));
   }
   * { box-sizing: border-box; }
   button { font: inherit; color: inherit; cursor: pointer; }
@@ -204,7 +221,7 @@ const STYLES = `
   .layout { display: flex; flex-direction: column; height: 100%; }
   header.bar {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 10px 16px;
+    padding: calc(10px + var(--safe-top)) 16px 10px;
     background: var(--app-header-background-color, var(--surface));
     color: var(--app-header-text-color, var(--primary-text-color));
     border-bottom: 1px solid var(--line);
@@ -231,6 +248,13 @@ const STYLES = `
   .icon-only { border: 0; background: transparent; padding: 8px; border-radius: 50%; display: grid; place-items: center; }
   .icon-only:hover { background: var(--surface-2); }
   .icon-only[hidden] { display: none; }
+  .sync { color: var(--muted); }
+  .sync[disabled] { cursor: default; }
+  .sync[disabled]:hover { background: transparent; }
+  .sync.spin svg { animation: spin 1.2s linear infinite; }
+  .sync.warn { color: var(--warn); }
+  @keyframes spin { to { transform: rotate(-360deg); } }
+  @media (prefers-reduced-motion: reduce) { .sync.spin svg { animation-duration: 4s; } }
 
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
@@ -245,7 +269,10 @@ const STYLES = `
   .btn[disabled] { opacity: .45; cursor: default; }
 
   .body { flex: 1; display: flex; min-height: 0; }
-  .list { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 22px; }
+  .list {
+    flex: 1; overflow-y: auto; padding: 16px 16px calc(16px + var(--safe-bottom));
+    display: flex; flex-direction: column; gap: 22px;
+  }
   .room-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
   .room-head h2 {
     margin: 0; font-size: 13px; font-weight: 500; letter-spacing: .4px;
@@ -294,6 +321,7 @@ const STYLES = `
   .panel {
     width: 420px; flex: none; border-left: 1px solid var(--line);
     background: var(--surface); display: flex; flex-direction: column;
+    padding-bottom: var(--safe-bottom);
   }
   .panel[hidden] { display: none; }
   .panel-head { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: flex-start; }
@@ -372,7 +400,7 @@ const STYLES = `
   .fatal { margin: 16px; padding: 16px; border-radius: 12px; background: rgba(219,68,55,.1); color: var(--danger); }
 
   .toast {
-    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    position: fixed; left: 50%; bottom: calc(24px + var(--safe-bottom)); transform: translateX(-50%);
     background: var(--primary-text-color); color: var(--primary-background-color);
     padding: 10px 18px; border-radius: 999px; font-size: 13px; z-index: 9;
     max-width: 90vw;
@@ -381,7 +409,11 @@ const STYLES = `
   .busy { opacity: .55; pointer-events: none; }
 
   @media (max-width: 900px) {
-    .panel { position: fixed; inset: 0; width: auto; z-index: 8; border-left: 0; }
+    /* карточка открыта поверх всего экрана — вырезы она обходит сама */
+    .panel {
+      position: fixed; inset: 0; width: auto; z-index: 8; border-left: 0;
+      padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+    }
     .row { grid-template-columns: 36px 1fr; row-gap: 6px; }
     .row .chips, .row .role, .row .meta { grid-column: 2; }
     .row.scenario { grid-template-columns: 36px 1fr auto; }
@@ -404,6 +436,12 @@ class YandexMenuPanel extends HTMLElement {
     this._message = null;
     this._busy = false;
     this._loaded = false;
+    // Список приходит из трёх мест: сохранённый, свежий и ответ на действие.
+    // Каждый запрос получает номер, и на экране остаётся ответ самого позднего.
+    this._seq = 0; // номер последнего запроса за списком
+    this._shown = 0; // номер запроса, чей список сейчас на экране
+    this._loading = 0; // сколько обновлений списка сейчас в пути
+    this._savedAt = null; // на экране сохранённый список — когда его прочитали
     this._room = null; // открыта карточка комнаты вместо устройства
     // Карточка открывалась сменой поля и следа в истории браузера не оставляла:
     // аппаратная «назад» на телефоне снимала запись входа в панель и уносила на
@@ -438,6 +476,8 @@ class YandexMenuPanel extends HTMLElement {
     if (!this._loaded) {
       this._loaded = true;
       this._render();
+      // Яндекс отвечает секунды: пока идёт свежий список, показываем прошлый
+      this._loadSaved();
       this._load(true);
       return;
     }
@@ -577,23 +617,67 @@ class YandexMenuPanel extends HTMLElement {
     return this._hass.connection.sendMessagePromise({ type, ...payload });
   }
 
-  async _load(force = false) {
+  /** Можно ли показать ответ запроса номер seq.
+
+      Нельзя, если на экране уже ответ более позднего: свежий список, запрошенный
+      до переименования, приходит после ответа на него и откатил бы имя назад. */
+  _take(seq) {
+    if (seq < this._shown) return false;
+    this._shown = seq;
+    return true;
+  }
+
+  /** Список, прочитанный в прошлый раз, — Home Assistant отдаёт его сразу. */
+  async _loadSaved() {
+    const seq = ++this._seq;
+    let saved = null;
     try {
-      this._data = await this._call("yandex_menu/list", { force });
-      this._error = null;
-      this._syncHouse();
-      this._dropGoneCard();
+      saved = await this._call("yandex_menu/list_saved");
     } catch (err) {
-      this._error = err && err.message ? err.message : String(err);
+      return; // не беда: свежий список уже в пути
+    }
+    if (!saved || !this._take(seq)) return;
+    this._data = saved;
+    this._savedAt = saved.saved_at || null;
+    this._syncHouse();
+    this._dropGoneCard();
+    this._render();
+  }
+
+  async _load(force = false) {
+    const seq = ++this._seq;
+    this._loading += 1;
+    this._renderStatus();
+    try {
+      const data = await this._call("yandex_menu/list", { force });
+      if (this._take(seq)) {
+        this._data = data;
+        this._savedAt = null;
+        this._error = null;
+        this._syncHouse();
+        this._dropGoneCard();
+      }
+    } catch (err) {
+      // На экране список новее этого запроса — ошибка к нему уже не относится.
+      // Иначе она видна: без списка — во весь экран, при старом — значком в шапке.
+      if (seq >= this._shown) this._error = err && err.message ? err.message : String(err);
+    } finally {
+      this._loading -= 1;
     }
     this._render();
   }
 
   async _act(type, payload, successText) {
+    const seq = ++this._seq;
     this._busy = true;
     this._render();
     try {
-      this._data = await this._call(type, payload);
+      const data = await this._call(type, payload);
+      if (this._take(seq)) {
+        this._data = data;
+        this._savedAt = null;
+        this._error = null;
+      }
       this._syncHouse();
       this._dropGoneCard();
       this._message = null;
@@ -1077,6 +1161,7 @@ class YandexMenuPanel extends HTMLElement {
             "M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"
           )}</button>
           <h1>Яндекс меню</h1>
+          <button class="icon-only sync" id="sync" hidden></button>
           <span class="account" id="account" title="Аккаунт Яндекса. Сменить: настройки интеграции" hidden></span>
           <nav class="houses" id="houses" aria-label="Дома" hidden></nav>
           <div class="grow"></div>
@@ -1108,6 +1193,7 @@ class YandexMenuPanel extends HTMLElement {
       account.textContent = info && info.name ? info.name : "";
     }
     this._renderHouses();
+    this._renderStatus();
     this._syncMenu();
     const layout = root.querySelector(".layout");
     if (layout) layout.classList.toggle("busy", this._busy);
@@ -1123,6 +1209,40 @@ class YandexMenuPanel extends HTMLElement {
     const hass = this._hass;
     const needed = this._narrow || (hass && hass.dockedSidebar === "always_hidden");
     button.hidden = !needed || Boolean(hass && hass.kioskMode);
+  }
+
+  /** Значок в шапке: крутится, пока список обновляется, и желтеет, если не вышло.
+      Жёлтый нажимается — это повтор, в том числе когда списка нет совсем. */
+  _renderStatus() {
+    const sync = this.shadowRoot.getElementById("sync");
+    if (!sync) return;
+    const loading = this._loading > 0;
+    const failed = !loading && Boolean(this._error);
+    const shown = this._savedAt ? ` Сейчас показан сохранённый список — ${this._when(this._savedAt)}.` : "";
+    let title = "";
+    if (loading) title = `Обновляю список.${shown}`;
+    else if (failed) title = `Список не обновился: ${this._error}.${shown} Нажмите, чтобы попробовать ещё раз.`;
+    sync.hidden = !title;
+    sync.disabled = loading;
+    sync.title = title;
+    sync.setAttribute("aria-label", title);
+    sync.classList.toggle("spin", loading);
+    sync.classList.toggle("warn", failed);
+    // Значок меняем, только когда он другой: перерисовка сбила бы вращение
+    const icon = failed ? "syncAlert" : "sync";
+    if (sync.dataset.icon !== icon) {
+      sync.dataset.icon = icon;
+      sync.innerHTML = this._svg(ICONS[icon], 20);
+    }
+  }
+
+  _when(seconds) {
+    return new Date(seconds * 1000).toLocaleString("ru-RU", {
+      day: "numeric",
+      month: "long",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   }
 
   /** Вкладки домов — только когда на аккаунте их несколько. */
@@ -1168,12 +1288,10 @@ class YandexMenuPanel extends HTMLElement {
     const shape = `${this._houseId || ""}|${this._query}`;
     const keepScroll = shape === this._listShape ? host.scrollTop : 0;
 
-    if (this._error) {
-      host.innerHTML = `<div class="fatal">${this._esc(this._error)}</div>`;
-      return;
-    }
     if (!this._data) {
-      host.innerHTML = `<div class="loader">Читаю Яндекс-дом…</div>`;
+      host.innerHTML = this._error
+        ? `<div class="fatal">${this._esc(this._error)}</div>`
+        : `<div class="loader">Читаю Яндекс-дом…</div>`;
       return;
     }
 
@@ -1617,6 +1735,13 @@ class YandexMenuPanel extends HTMLElement {
 
     root.getElementById("menu").addEventListener("click", () => {
       this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
+    });
+
+    root.getElementById("sync").addEventListener("click", () => {
+      if (this._loading) return;
+      // без списка ошибка и так во весь экран, а поверх списка её иначе не видно
+      if (this._error && this._data) this._toast(`Список не обновился: ${this._error}. Пробую ещё раз`);
+      this._load(true);
     });
 
     root.getElementById("houses").addEventListener("click", (event) => {

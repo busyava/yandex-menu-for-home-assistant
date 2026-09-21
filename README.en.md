@@ -139,6 +139,12 @@ opens its card on the right. On a phone the system back button closes the card a
 press closes the card, the second takes you off the panel (and if you opened the device from a room
 card, back takes you there first).
 
+Yandex takes its time with the list: a home of thirty-odd devices needs about ten seconds. So the
+panel opens with the list it read last time and fetches a fresh one by itself. While that is going
+on, an icon spins in the header next to the title, and then the list on screen quietly updates. If
+the refresh fails, the icon turns yellow and the previous list stays on screen, fully usable.
+Pressing the yellow icon tries again.
+
 ### Names
 
 The first name in the list is the primary one, and it is the one the Yandex app shows. The rest
@@ -259,10 +265,13 @@ remembers two small things: which home is open and which Station is picked for t
 keys `yandex_menu.house` and `yandex_menu.station`). Those entries stay in the browser and go
 nowhere.
 
-The integration keeps one file on disk in Home Assistant —
-`config/.storage/yandex_menu.snapshots`. It holds the snapshots: a device's names, its room and its
+The integration keeps two files on disk in Home Assistant.
+`config/.storage/yandex_menu.snapshots` holds the snapshots: a device's names, its room and its
 light role. They are there so you can put the settings back if Yandex recreates a device — the
 button puts back the names and the role, and leaves the room as it is.
+`config/.storage/yandex_menu.list` holds the last list read: the same thing the panel shows on
+screen, kept so that it opens at once next time. There are no passwords or tokens in it. The
+integration deletes this file itself when it is removed.
 
 The panel and all its commands are open to Home Assistant administrators only: an ordinary user
 sees neither the sidebar item nor the data.
@@ -294,6 +303,11 @@ A few things stay behind, and that is normal:
 **«Не найдена интеграция Яндекс.Станция»** (the Yandex Station integration was not found). Set
 [Yandex Station](https://github.com/AlexxIT/YandexStation) up first; that is where access to the
 Yandex home comes from.
+
+**The header icon turned yellow.** The list did not refresh, and the previous one is on screen.
+What Yandex answered is in the icon's tooltip, and on a phone it shows up when you tap the icon.
+The tap also tries again. If there is no previous list, Yandex's answer is written right where the
+list would be, and the icon is there to try again.
 
 **The device did not appear after Expose to Alice (Отдать в Алису).** Most often the entity is
 `unavailable` or `unknown`, and Yandex does not take those. Bring it back to life and press

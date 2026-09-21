@@ -67,6 +67,8 @@ CONDITIONAL_DOMAINS = (
 
 STORAGE_KEY = "yandex_menu.snapshots"
 STORAGE_VERSION = 1
+# Последний прочитанный список: панель показывает его сразу, пока Яндекс отвечает
+SAVED_STORAGE_KEY = "yandex_menu.list"
 
 DATA_API = "api"
 DATA_STORE = "store"
@@ -74,8 +76,11 @@ DATA_SNAPSHOTS = "snapshots"  # слепки текущего аккаунта
 DATA_STORE_DATA = "store_data"  # всё хранилище: слепки по аккаунтам
 DATA_DETAILS = "details"  # кэш карточек устройств
 DATA_CACHE = "cache"
+DATA_SAVED = "saved"  # последний прочитанный список и когда он прочитан
+DATA_SAVED_STORE = "saved_store"
+DATA_SAVED_TURN = "saved_turn"  # номер сборки, чей список запомнен
 DATA_WS_REGISTERED = "ws_registered"
 
 CACHE_TTL = 15  # секунд, чтобы повторное открытие панели не дёргало Яндекс заново
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
