@@ -681,8 +681,11 @@ class YandexMenuPanel extends HTMLElement {
         this._renderStatus();
         if (!this._data) {
           if (!this._error) this._renderList();
-        } else if (this._data.partial || (state && state.ready)) {
+        } else if (state && (state.ready || state.preview)) {
           this._scheduleList();
+        } else {
+          // Список целиком не трогаем: перерисовка съедала бы нажатия и прокрутку
+          this._renderReading();
         }
       },
       { type: "yandex_menu/progress" }
@@ -698,7 +701,8 @@ class YandexMenuPanel extends HTMLElement {
       остальное дочитывается. Берём его, только когда показать нечего: сохранённый
       список полнее черновика. */
   _takePreview(preview) {
-    if (this._data) return;
+    // свежий черновик заменяет и прежний — например, после обрыва связи
+    if (this._data && !this._data.partial) return;
     this._data = preview;
     this._syncHouse();
     this._render();
@@ -724,13 +728,28 @@ class YandexMenuPanel extends HTMLElement {
 
   /** Строки дочитываются пачками — перерисовываем не чаще раза в полсекунды. */
   _scheduleList() {
-    if (this._listTimer) return;
+    if (this._listTimer || !this.isConnected) return;
     this._listTimer = setTimeout(() => {
       this._listTimer = null;
       this._renderList();
       this._renderHouses();
+      this._renderPanel(); // открытая карточка комнаты или дочитанного устройства
       this._fresh.clear();
     }, 500);
+  }
+
+  /** Только полоска над черновым списком. */
+  _renderReading() {
+    const box = this.shadowRoot.querySelector(".reading");
+    const html = this._readingHtml();
+    if (!box || !html) {
+      // полоски ещё нет или пора её убрать — это уже перерисовка списка
+      if (box || html) this._scheduleList();
+      return;
+    }
+    const holder = document.createElement("div");
+    holder.innerHTML = html;
+    box.replaceWith(holder.firstElementChild);
   }
 
   /** «около 3 минут» по оценке сервера. */
@@ -1591,6 +1610,7 @@ class YandexMenuPanel extends HTMLElement {
     }
 
     if (this._data.partial) {
+      if (query && !html.includes('class="row')) html += `<div class="empty">Ничего не нашлось.</div>`;
       // сущности HA у части устройств ещё не известны — предлагать отдать рано
       html += `<section><div class="room-head"><h2>Отдать в Алису</h2></div><div class="card"><div class="empty">
         Появится, когда список дочитается: пока не видно, какие сущности Home Assistant уже в Алисе.
@@ -1659,8 +1679,11 @@ class YandexMenuPanel extends HTMLElement {
     // Карточку восстановили из истории, а список ещё в пути: Яндекс отвечает
     // секунды. Без заглушки человек видел бы пустой экран и не понимал, что
     // «назад» ему закрывать.
-    if (!this._data && (this._selected || this._room)) {
-      if (this._error) {
+    // Устройство из черновика: без настроек карточка показала бы не те кнопки —
+    // например, «Удалить» вместо «Убрать из Алисы» у устройства из Home Assistant
+    const reading = !this._room && Boolean(this._device(this._selected)?.pending);
+    if ((!this._data && (this._selected || this._room)) || reading) {
+      if (this._error && !reading) {
         // список не пришёл вовсе — ошибку видно в самом списке, карточке нечего показать
         host.hidden = true;
         host.innerHTML = "";
@@ -1672,8 +1695,10 @@ class YandexMenuPanel extends HTMLElement {
       host.innerHTML = `
         <div class="panel-head">
           <div>
-            <h3>Читаю Яндекс-дом…</h3>
-            <div class="entity">карточка откроется, как придёт список</div>
+            <h3>${reading ? this._esc(this._device(this._selected).names[0]) : "Читаю Яндекс-дом…"}</h3>
+            <div class="entity">${
+              reading ? "дочитываю настройки — карточка откроется сама" : "карточка откроется, как придёт список"
+            }</div>
           </div>
           <button class="icon-only" id="close" title="Закрыть" style="margin-left:auto">${this._svg(
             "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z",
@@ -1717,14 +1742,24 @@ class YandexMenuPanel extends HTMLElement {
     }
     host.hidden = false;
 
-    const lights = devices.filter((device) => /light/.test(device.current_type || device.type || ""));
+    const allLights = devices.filter((device) => /light/.test(device.current_type || device.type || ""));
+    // у недочитанных роль ещё не известна — в «основной свет» их не записываем
+    const lights = allLights.filter((device) => !device.pending);
+    const unread = allLights.length - lights.length;
     const main = lights.filter((device) => !device.role || device.role.endsWith("main"));
     const secondary = lights.filter((device) => device.role && device.role.endsWith("secondary"));
     const openChips = (items) =>
       items
         .map((device) => `<button class="chip" data-open="${device.id}">${this._esc(device.names[0])}</button>`)
         .join("");
-    const who = lights.length
+    const who = unread
+      ? `<p class="who">Кто откликнется на «включи свет», будет видно, когда дочитаю настройки: осталось ${unread} ${this._plural(
+          unread,
+          "лампа",
+          "лампы",
+          "ламп"
+        )}.</p>`
+      : lights.length
       ? `<p class="who">На «включи свет» откликнется основной свет:</p>
          <div class="chips">${
            main.length ? openChips(main) : `<span class="role">никто, у всего света роль «доп»</span>`
