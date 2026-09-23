@@ -72,7 +72,8 @@ too — that is what the main and secondary light roles on a lamp are for.
 - **Refresh the list** (Обновить список). Asks Yandex to go through the Home Assistant skill
   again — freshly exposed entities show up in Alice after that. Until at least one device has been
   exposed from Home Assistant, there is no skill and nothing to refresh — expose one
-  entity to Alice first.
+  entity to Alice first. The panel also reads every device again, so whatever was changed in the
+  «Дом с Алисой» app (a second name, the light role) turns up.
 
 ### Safety net
 
@@ -265,13 +266,15 @@ remembers two small things: which home is open and which Station is picked for t
 keys `yandex_menu.house` and `yandex_menu.station`). Those entries stay in the browser and go
 nowhere.
 
-The integration keeps two files on disk in Home Assistant.
+The integration keeps three files on disk in Home Assistant.
 `config/.storage/yandex_menu.snapshots` holds the snapshots: a device's names, its room and its
 light role. They are there so you can put the settings back if Yandex recreates a device — the
 button puts back the names and the role, and leaves the room as it is.
 `config/.storage/yandex_menu.list` holds the last list read: the same thing the panel shows on
-screen, kept so that it opens at once next time. There are no passwords or tokens in it. The
-integration deletes this file itself when it is removed.
+screen, kept so that it opens at once next time. `config/.storage/yandex_menu.devices` holds the
+settings and abilities of devices: Yandex gives them out one device at a time, and in a big home
+reading them all again every time takes minutes. There are no passwords or tokens in these two
+files, and the integration deletes both itself when it is removed.
 
 The panel and all its commands are open to Home Assistant administrators only: an ordinary user
 sees neither the sidebar item nor the data.
@@ -308,6 +311,12 @@ Yandex home comes from.
 What Yandex answered is in the icon's tooltip, and on a phone it shows up when you tap the icon.
 The tap also tries again. If there is no previous list, Yandex's answer is written right where the
 list would be, and the icon is there to try again.
+
+**The first load takes long.** Yandex gives out each device's settings in a separate request, and
+Yandex Station keeps a pause between requests, so a home with several hundred devices takes
+minutes to read. The panel shows which home it is reading and how much is left. It remembers what
+it has read and opens at once from then on. **Refresh the list** (Обновить список) takes just as
+long, since it reads everything again.
 
 **The device did not appear after Expose to Alice (Отдать в Алису).** Most often the entity is
 `unavailable` or `unknown`, and Yandex does not take those. Bring it back to life and press

@@ -32,12 +32,20 @@ from .const import (
     CACHE_TTL,
     CONDITIONAL_DOMAINS,
     DATA_API,
+    DATA_BUILD,
+    DATA_BUILDS,
     DATA_CACHE,
+    DATA_CACHE_OWNER,
+    DATA_CACHE_STORE,
+    DATA_CONFIGS,
     DATA_DETAILS,
+    DATA_PROGRESS,
+    DATA_PROGRESS_LISTENERS,
     DATA_SAVED,
     DATA_SAVED_STORE,
     DATA_SAVED_TURN,
     DATA_SNAPSHOTS,
+    DATA_STALE,
     DATA_STORE,
     DATA_STORE_DATA,
     DOMAIN,
@@ -62,9 +70,23 @@ VOICE_CAPABILITIES = ("on_off", "color_setting", "range", "mode", "toggle", "vid
 # пропуски, поэтому за ними идём в карточку устройства. Остальным хватает списка.
 DETAIL_CAPABILITIES = ("devices.capabilities.color_setting", "devices.capabilities.mode")
 
-# Умения почти не меняются, а Яндекс.Станция держит паузу 0,2 с между запросами.
-# Карточки кэшируем, чтобы каждое открытие панели не стоило лишних секунд.
-DETAIL_TTL = 600
+# Яндекс.Станция держит паузу 0,2 с между любыми запросами, а настройки и карточку
+# Яндекс отдаёт только по одному устройству. В доме на сотни устройств полная
+# сборка идёт минутами, поэтому и то и другое кэшируем и храним на диске. Умения
+# не меняются почти никогда, настройки — редко: свои правки панель сбрасывает
+# сразу, смену основного имени в приложении Яндекса видно по общему списку, а
+# «Обновить список» перечитывает всё.
+DETAIL_TTL = 7 * 24 * 3600
+CONFIG_TTL = 7 * 24 * 3600
+
+# Что из ответов Яндекса нужно панели — только это и кладём на диск
+CONFIG_KEYS = ("name", "names", "device_type", "external_id", "skill_id")
+DETAIL_KEYS = ("capabilities", "properties")
+
+# Прогресс сборки панели шлём не чаще, чем раз в полсекунды
+PROGRESS_EVERY = 0.5
+# Прочитанное долгой сборкой кладём на диск раз в минуту (запись идёт через 30 с)
+SAVE_EVERY = 60
 
 # Сборки нумеруются по порядку запуска: какой список новее, решаем по номеру,
 # а не по часам — часы могут и прыгнуть.
@@ -354,15 +376,136 @@ def _households_of(
     return households, rooms, flat
 
 
-async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any]:
-    """Собирает всё, что нужно панели, за один заход."""
-    store_data = hass.data[DOMAIN]
-    cache = store_data.get(DATA_CACHE)
+async def _collect(
+    hass: HomeAssistant, use_cache: bool = True, fresh: bool = False
+) -> dict[str, Any]:
+    """Список для панели. Сборки идут по одной.
+
+    Две сборки разом делили бы паузу Станции и шли бы вдвое дольше каждая.
+    Поэтому, пока список собирается, новый запрос ждёт эту сборку и получает
+    её ответ. `fresh` — список нужен после правки: уже идущая сборка правку
+    могла не увидеть, такой запрос встаёт в очередь за ней.
+    """
+    data = hass.data[DOMAIN]
+    cache = data.get(DATA_CACHE)
     if use_cache and cache and time.time() - cache["ts"] < CACHE_TTL:
         return cache["payload"]
 
+    running: asyncio.Task | None = data.get(DATA_BUILD)
+    if running is not None and running.done():
+        running = None
+    if running is not None and not fresh:
+        return await _wait_build(running)
+
+    async def after_running() -> dict[str, Any]:
+        if running is not None:
+            await asyncio.wait([running])
+        return await _build(hass)
+
+    task = hass.async_create_background_task(after_running(), "yandex_menu: список")
+    # все сборки очереди, чтобы при выгрузке остановить каждую, а не только последнюю
+    builds: set[asyncio.Task] = data.setdefault(DATA_BUILDS, set())
+    builds.add(task)
+
+    def finished(done: asyncio.Task) -> None:
+        builds.discard(done)
+        # Ошибку получат все, кто ждёт; если ждать уже некому, пусть не сыплется в лог
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(finished)
+    data[DATA_BUILD] = task
+    return await _wait_build(task)
+
+
+async def _wait_build(task: asyncio.Task) -> dict[str, Any]:
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if task.cancelled() and not (current and current.cancelling()):
+            # сборку остановили: интеграцию перезапустили или удалили
+            raise QuasarError(
+                "Список не дочитан: интеграцию перезапустили. Откройте панель заново."
+            ) from None
+        raise
+
+
+def _stop_build(hass: HomeAssistant) -> None:
+    """Интеграцию выгружают — идущая сборка больше никому не нужна."""
+    data = hass.data.get(DOMAIN, {})
+    for task in list(data.get(DATA_BUILDS) or ()):
+        task.cancel()
+    data[DATA_BUILD] = None
+    _publish_progress(hass, None)
+
+
+def _forget_devices(hass: HomeAssistant) -> None:
+    """«Обновить список»: всё, что помним об устройствах, читаем заново."""
+    data = hass.data[DOMAIN]
+    _touch(hass, *set(data.get(DATA_CONFIGS) or ()) | set(data.get(DATA_DETAILS) or ()))
+
+
+def _known_skill_id(hass: HomeAssistant) -> str | None:
+    """Навык Home Assistant в Яндексе — из того, что уже прочитано, без похода туда."""
+    data = hass.data[DOMAIN]
+    for holder in (data.get(DATA_CACHE), data.get(DATA_SAVED)):
+        if holder and holder["payload"].get("skill_id"):
+            return holder["payload"]["skill_id"]
+    for _ts, config in (data.get(DATA_CONFIGS) or {}).values():
+        if config.get("skill_id") and _is_ha_entity(hass, config.get("external_id")):
+            return config["skill_id"]
+    return None
+
+
+def _save_devices(hass: HomeAssistant, owner: str) -> None:
+    data = hass.data[DOMAIN]
+    store = data.get(DATA_CACHE_STORE)
+    if store is None or owner != account_key(hass) or data.get(DATA_CACHE_OWNER) != owner:
+        return
+    # Что писать, решаем в момент записи: за 30 с аккаунт могли сменить, и тогда
+    # в кэше уже устройства нового — подписываем их новым владельцем
+    store.async_delay_save(
+        lambda: {
+            "account": data.get(DATA_CACHE_OWNER),
+            "configs": data.get(DATA_CONFIGS) or {},
+            "details": data.get(DATA_DETAILS) or {},
+        },
+        30,
+    )
+
+
+def _touch(hass: HomeAssistant, *device_ids: str) -> None:
+    """Устройство поменяли из панели — его настройки и карточку читаем заново.
+
+    Счётчик нужен сборке, которая шла во время правки: она могла прочитать
+    настройки ещё до правки, и такой ответ класть в кэш нельзя.
+    """
+    data = hass.data[DOMAIN]
+    stale: dict[str, int] = data.setdefault(DATA_STALE, {})
+    for device_id in device_ids:
+        stale[device_id] = stale.get(device_id, 0) + 1
+        data.setdefault(DATA_CONFIGS, {}).pop(device_id, None)
+        data.setdefault(DATA_DETAILS, {}).pop(device_id, None)
+    if device_ids:
+        _save_devices(hass, account_key(hass))
+
+
+def _publish_progress(hass: HomeAssistant, state: dict[str, Any] | None) -> None:
+    data = hass.data[DOMAIN]
+    data[DATA_PROGRESS] = state
+    for send in list(data.get(DATA_PROGRESS_LISTENERS) or ()):
+        send(state)
+
+
+async def _build(hass: HomeAssistant) -> dict[str, Any]:
+    """Собирает всё, что нужно панели, за один заход."""
+    store_data = hass.data[DOMAIN]
     turn = next(_TURNS)
     owner = account_key(hass)
+    account = station_entry(hass)
+    # слепки тоже берём в начале: сменят аккаунт — чужие устройства в них не попадут
+    snapshots: dict[str, Any] = store_data[DATA_SNAPSHOTS]
     api = _api(hass)
     raw = await api.devices()
 
@@ -377,35 +520,146 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
             _LOGGER.debug("%s %s не прочиталась: %s", what, device_id, err)
             return None
 
-    async def nothing() -> None:
+    async def nothing(value: dict | None = None) -> dict | None:
+        return value
+
+    # Кэши берём в начале: сменят аккаунт — эта сборка пишет в старые и чужие
+    # настройки новому аккаунту не достанутся
+    details: dict[str, tuple[float, dict]] = store_data.setdefault(DATA_DETAILS, {})
+    configs: dict[str, tuple[float, dict]] = store_data.setdefault(DATA_CONFIGS, {})
+    stale: dict[str, int] = store_data.setdefault(DATA_STALE, {})
+
+    def cached(store: dict[str, tuple[float, dict]], device_id: str, ttl: int) -> dict | None:
+        hit = store.get(device_id)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
         return None
 
-    details: dict[str, tuple[float, dict]] = store_data.setdefault(DATA_DETAILS, {})
-
-    async def detail_of(device_id: str) -> dict[str, Any] | None:
-        cached = details.get(device_id)
-        if cached and time.time() - cached[0] < DETAIL_TTL:
-            return cached[1]
-        detail = await read(api.device(device_id), "Карточка", device_id)
-        if detail:
-            details[device_id] = (time.time(), detail)
-        return detail
-
-    async def load(device: dict[str, Any]) -> tuple[dict | None, dict | None]:
+    def needs_detail(device: dict[str, Any]) -> bool:
         # Настройки дают имена и сущность HA, карточка — умения с названиями
-        needs_detail = any(
+        return any(
             capability.get("type") in DETAIL_CAPABILITIES
             for capability in device.get("capabilities") or []
         )
+
+    def config_hit(device: dict[str, Any]) -> dict | None:
+        config = cached(configs, device["id"], CONFIG_TTL)
+        # Основное имя сменили в приложении Яндекса — настройки устарели
+        if config and config.get("name") and config["name"] != device.get("name"):
+            return None
+        return config
+
+    def detail_hit(device: dict[str, Any]) -> dict | None:
+        return cached(details, device["id"], DETAIL_TTL)
+
+    shared_houses = {house["id"] for house in households if house["shared"]}
+
+    async def remember(
+        store: dict[str, tuple[float, dict]],
+        device_id: str,
+        coro,
+        what: str,
+        keys: tuple[str, ...],
+        household_id: str | None,
+    ) -> dict[str, Any] | None:
+        mark = stale.get(device_id, 0)
+        result = await read(coro, what, device_id)
+        if stale.get(device_id, 0) != mark:
+            return result
+        if result:
+            store[device_id] = (time.time(), {key: result[key] for key in keys if key in result})
+        elif household_id in shared_houses:
+            # В общем доме Яндекс настройки может не отдавать вовсе, и каждая
+            # попытка стоит трёх запросов. Такой отказ помним. Сбой в своём
+            # доме — нет: он разовый, в следующий раз прочитаем.
+            store[device_id] = (time.time(), {})
+        return result
+
+    house_names = {house["id"]: house["name"] for house in households}
+    todo = [
+        placed
+        for placed in flat
+        if config_hit(placed[0]) is None
+        or (needs_detail(placed[0]) and detail_hit(placed[0]) is None)
+    ]
+    started = time.monotonic()
+    progress = {"house": None, "done": 0, "total": len(todo), "left": None}
+    sent = 0.0
+    published = False
+    saved = time.monotonic()
+
+    def step(household_id: str | None, done: bool) -> None:
+        nonlocal sent, published, saved
+        now = time.monotonic()
+        if done and now - saved > SAVE_EVERY:
+            # долгая сборка сохраняет прочитанное по ходу: перезапуск HA посреди
+            # неё не должен начинать всё с нуля
+            saved = now
+            _save_devices(hass, owner)
+        if done:
+            progress["done"] += 1
+            # устройство могли поменять из панели уже после подсчёта — оно сверх плана
+            progress["total"] = max(progress["total"], progress["done"])
+        else:
+            progress["house"] = house_names.get(household_id)
+        count, total = progress["done"], progress["total"]
+        if count < total and now - sent < PROGRESS_EVERY:
+            return
+        sent = now
+        # Скорость упирается в паузу Станции, так что оценка по первым
+        # устройствам держится до конца
+        pace = (now - started) / count if count >= PARALLEL_CONFIG_REQUESTS else 0.3
+        progress["left"] = round(pace * (total - count))
+        published = True
+        _publish_progress(hass, dict(progress))
+
+    async def load(placed: Placed) -> tuple[dict | None, dict | None]:
+        device, _room, _room_id, household_id = placed
+        config = config_hit(device)
+        detail = detail_hit(device) if needs_detail(device) else None
+        if config is not None and (detail is not None or not needs_detail(device)):
+            return config, detail
         async with semaphore:
-            return await asyncio.gather(
-                read(api.device_config(device["id"]), "Настройки", device["id"]),
-                detail_of(device["id"]) if needs_detail else nothing(),
+            step(household_id, done=False)
+            config, detail = await asyncio.gather(
+                remember(
+                    configs,
+                    device["id"],
+                    api.device_config(device["id"]),
+                    "Настройки",
+                    CONFIG_KEYS,
+                    household_id,
+                )
+                if config is None
+                else nothing(config),
+                remember(
+                    details,
+                    device["id"],
+                    api.device(device["id"]),
+                    "Карточка",
+                    DETAIL_KEYS,
+                    household_id,
+                )
+                if needs_detail(device) and detail is None
+                else nothing(detail),
             )
+            step(household_id, done=True)
+        return config, detail
 
-    loaded = await asyncio.gather(*(load(item[0]) for item in flat))
+    loads = [asyncio.ensure_future(load(placed)) for placed in flat]
+    try:
+        loaded = await asyncio.gather(*loads)
+    except BaseException:
+        # сборку отменили или она упала — остальным устройствам в Яндекс ходить незачем
+        for pending in loads:
+            pending.cancel()
+        raise
+    finally:
+        if published:
+            _publish_progress(hass, None)
+    if todo:
+        _save_devices(hass, owner)
 
-    snapshots: dict[str, Any] = hass.data[DOMAIN][DATA_SNAPSHOTS]
     devices: list[dict[str, Any]] = []
     skill_id: str | None = None
 
@@ -463,7 +717,6 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
         _LOGGER.debug("Сценарии не прочитались: %s", err)
         scenarios = None
 
-    account = station_entry(hass)
     payload = {
         "devices": devices,
         "households": households,
@@ -480,7 +733,8 @@ async def _collect(hass: HomeAssistant, use_cache: bool = True) -> dict[str, Any
             "several": len(station_entries(hass)) > 1,
         },
     }
-    hass.data[DOMAIN][DATA_CACHE] = {"ts": time.time(), "payload": payload}
+    if owner == account_key(hass):
+        hass.data[DOMAIN][DATA_CACHE] = {"ts": time.time(), "payload": payload}
     _save_list(hass, payload, turn, owner)
     return payload
 
@@ -584,13 +838,23 @@ def _drop_cache(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][DATA_CACHE] = None
 
 
-async def _reply(hass, connection, msg, coro, remember: str | None = None) -> None:
+async def _reply(
+    hass,
+    connection,
+    msg,
+    coro,
+    remember: str | None = None,
+    touch: str | None = None,
+) -> None:
     """Выполняет действие и отвечает свежим списком.
 
     Если действие вернуло строку — она уедет в панель как примечание.
     `remember` — id устройства, чей слепок надо освежить принудительно.
+    `touch` — устройство, которое действие меняет: его перечитаем, остальные
+    возьмём из кэша.
     """
     notice: str | None = None
+    changed = [device_id for device_id in (remember, touch) if device_id]
     try:
         result = await coro
         if isinstance(result, str):
@@ -602,9 +866,12 @@ async def _reply(hass, connection, msg, coro, remember: str | None = None) -> No
         _LOGGER.exception("Неожиданная ошибка команды панели")
         connection.send_error(msg["id"], "unknown_error", str(err))
         return
+    finally:
+        # и при ошибке: правка могла пройти наполовину
+        _touch(hass, *changed)
     _drop_cache(hass)
     try:
-        payload = await _collect(hass, use_cache=False)
+        payload = await _collect(hass, use_cache=False, fresh=True)
     except QuasarError as err:
         connection.send_error(msg["id"], "quasar_error", str(err))
         return
@@ -725,7 +992,11 @@ async def ws_name_primary(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.async_response
 async def ws_set_room(hass: HomeAssistant, connection, msg) -> None:
     await _reply(
-        hass, connection, msg, _api(hass).set_room(msg["device_id"], msg["room_id"])
+        hass,
+        connection,
+        msg,
+        _api(hass).set_room(msg["device_id"], msg["room_id"]),
+        touch=msg["device_id"],
     )
 
 
@@ -761,7 +1032,13 @@ async def ws_set_role(hass: HomeAssistant, connection, msg) -> None:
 )
 @websocket_api.async_response
 async def ws_delete_device(hass: HomeAssistant, connection, msg) -> None:
-    await _reply(hass, connection, msg, _api(hass).delete_device(msg["device_id"]))
+    await _reply(
+        hass,
+        connection,
+        msg,
+        _api(hass).delete_device(msg["device_id"]),
+        touch=msg["device_id"],
+    )
 
 
 @websocket_api.require_admin
@@ -774,7 +1051,10 @@ async def ws_delete_device(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.async_response
 async def ws_discovery(hass: HomeAssistant, connection, msg) -> None:
     async def run() -> None:
-        skill_id = msg.get("skill_id")
+        skill_id = msg.get("skill_id") or _known_skill_id(hass)
+        # «Обновить список» — и повод перечитать всё, что поменяли в приложении
+        # Яндекса. Перечитает сборка ответа — уже после того, как Яндекс обновится.
+        _forget_devices(hass)
         if not skill_id:
             payload = await _collect(hass, use_cache=True)
             skill_id = payload.get("skill_id")
@@ -875,7 +1155,7 @@ async def ws_withdraw(hass: HomeAssistant, connection, msg) -> None:
         await api.delete_device(msg["device_id"])
         return "Убрал из Алисы: снял метку и удалил устройство."
 
-    await _reply(hass, connection, msg, run())
+    await _reply(hass, connection, msg, run(), touch=msg["device_id"])
 
 
 @websocket_api.require_admin
@@ -965,7 +1245,28 @@ async def ws_restore(hass: HomeAssistant, connection, msg) -> None:
         if role and device_type:
             await api.set_type(msg["device_id"], device_type, role)
 
-    await _reply(hass, connection, msg, run())
+    await _reply(hass, connection, msg, run(), touch=msg["device_id"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "yandex_menu/progress"})
+@callback
+def ws_progress(hass: HomeAssistant, connection, msg) -> None:
+    """Подписка на ход сборки: какой дом читаем, сколько устройств осталось.
+
+    Сразу после подписки приходит текущее состояние, дальше — изменения.
+    None — сборки нет или ей нечего читать по одному.
+    """
+    listeners: set = hass.data[DOMAIN].setdefault(DATA_PROGRESS_LISTENERS, set())
+
+    @callback
+    def send(state: dict[str, Any] | None) -> None:
+        connection.send_message(websocket_api.event_message(msg["id"], state))
+
+    listeners.add(send)
+    connection.subscriptions[msg["id"]] = lambda: listeners.discard(send)
+    connection.send_result(msg["id"])
+    send(hass.data[DOMAIN].get(DATA_PROGRESS))
 
 
 @callback
@@ -973,6 +1274,7 @@ def async_register(hass: HomeAssistant) -> None:
     for command in (
         ws_list,
         ws_list_saved,
+        ws_progress,
         ws_name_add,
         ws_name_delete,
         ws_name_primary,

@@ -397,6 +397,13 @@ const STYLES = `
 
   .empty { padding: 40px 16px; text-align: center; color: var(--muted); }
   .loader { padding: 40px 16px; text-align: center; color: var(--muted); }
+  .loader .what { color: var(--primary-text-color); }
+  .loader .left { margin-top: 4px; font-size: 13px; }
+  .loader .bar { width: min(320px, 100%); height: 4px; margin: 14px auto 0; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+  .loader .bar i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+  .loader .hint { max-width: 420px; margin: 16px auto 0; font-size: 13px; line-height: 1.45; }
+  .sync-note { font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: -4px; }
+  .sync-note[hidden] { display: none; }
   .fatal { margin: 16px; padding: 16px; border-radius: 12px; background: rgba(219,68,55,.1); color: var(--danger); }
 
   .toast {
@@ -442,6 +449,8 @@ class YandexMenuPanel extends HTMLElement {
     this._shown = 0; // номер запроса, чей список сейчас на экране
     this._loading = 0; // сколько обновлений списка сейчас в пути
     this._savedAt = null; // на экране сохранённый список — когда его прочитали
+    this._progress = null; // как далеко зашла сборка списка: дом, сколько прочитано
+    this._unsubProgress = null;
     this._room = null; // открыта карточка комнаты вместо устройства
     // Карточка открывалась сменой поля и следа в истории браузера не оставляла:
     // аппаратная «назад» на телефоне снимала запись входа в панель и уносила на
@@ -477,6 +486,7 @@ class YandexMenuPanel extends HTMLElement {
       this._loaded = true;
       this._render();
       // Яндекс отвечает секунды: пока идёт свежий список, показываем прошлый
+      this._watchProgress();
       this._loadSaved();
       this._load(true);
       return;
@@ -504,10 +514,15 @@ class YandexMenuPanel extends HTMLElement {
     if (!this.shadowRoot.firstChild) this._render();
     else if (card) this._render();
     window.addEventListener("popstate", this._onPop);
+    if (this._loaded) this._watchProgress();
   }
 
   disconnectedCallback() {
     window.removeEventListener("popstate", this._onPop);
+    if (this._unsubProgress) {
+      this._unsubProgress.then((unsub) => unsub()).catch(() => {});
+      this._unsubProgress = null;
+    }
     clearTimeout(this._toastTimer);
     // Свою запись здесь не снимаем: history.back() посреди чужой навигации
     // отменил бы переход, который пользователь только что сделал.
@@ -625,6 +640,47 @@ class YandexMenuPanel extends HTMLElement {
     if (seq < this._shown) return false;
     this._shown = seq;
     return true;
+  }
+
+  /** Ход сборки списка. В большом доме первая сборка идёт минутами: Яндекс
+      отдаёт настройки каждого устройства отдельно, и видно должно быть, что
+      работа идёт, а не зависла. */
+  _watchProgress() {
+    if (this._unsubProgress || !this._hass) return;
+    this._unsubProgress = this._hass.connection.subscribeMessage(
+      (state) => {
+        this._progress = state || null;
+        this._renderStatus();
+        if (!this._data && !this._error) this._renderList();
+      },
+      { type: "yandex_menu/progress" }
+    );
+    const mine = this._unsubProgress;
+    mine.catch(() => {
+      // без прогресса панель работает как раньше
+      if (this._unsubProgress === mine) this._unsubProgress = null;
+    });
+  }
+
+  /** «около 3 минут» по оценке сервера. */
+  _leftText(seconds) {
+    if (seconds === null || seconds === undefined) return "";
+    if (seconds < 15) return "ещё несколько секунд";
+    if (seconds < 60) return "осталось меньше минуты";
+    if (seconds < 90) return "осталось около минуты";
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `осталось около ${minutes} ${this._plural(minutes, "минуты", "минут", "минут")}`;
+    const hours = Math.round(minutes / 60);
+    return `осталось около ${hours} ${this._plural(hours, "часа", "часов", "часов")}`;
+  }
+
+  /** «Читаю дом «Дача»: 124 из 380» — или null, когда читать по одному нечего. */
+  _progressText() {
+    const state = this._progress;
+    if (!state || !state.total) return null;
+    const done = Math.min(state.done, state.total);
+    const where = state.house ? `дом «${state.house}»` : "Яндекс-дом";
+    return { what: `Читаю ${where}: ${done} из ${state.total}`, left: this._leftText(state.left), done, total: state.total };
   }
 
   /** Список, прочитанный в прошлый раз, — Home Assistant отдаёт его сразу. */
@@ -1162,6 +1218,7 @@ class YandexMenuPanel extends HTMLElement {
           )}</button>
           <h1>Яндекс меню</h1>
           <button class="icon-only sync" id="sync" hidden></button>
+          <span class="sync-note" id="syncnote" hidden></span>
           <span class="account" id="account" title="Аккаунт Яндекса. Сменить: настройки интеграции" hidden></span>
           <nav class="houses" id="houses" aria-label="Дома" hidden></nav>
           <div class="grow"></div>
@@ -1219,15 +1276,25 @@ class YandexMenuPanel extends HTMLElement {
     const loading = this._loading > 0;
     const failed = !loading && Boolean(this._error);
     const shown = this._savedAt ? ` Сейчас показан сохранённый список — ${this._when(this._savedAt)}.` : "";
+    // «Обновить список» в большом доме тоже идёт минутами — счётчик нужен и там
+    const progress = loading || this._busy ? this._progressText() : null;
     let title = "";
-    if (loading) title = `Обновляю список.${shown}`;
+    if (progress) title = `${progress.what}, ${progress.left}.${shown}`;
+    else if (loading) title = `Обновляю список.${shown}`;
     else if (failed) title = `Список не обновился: ${this._error}.${shown} Нажмите, чтобы попробовать ещё раз.`;
     sync.hidden = !title;
-    sync.disabled = loading;
+    sync.disabled = loading || Boolean(progress);
     sync.title = title;
     sync.setAttribute("aria-label", title);
-    sync.classList.toggle("spin", loading);
+    sync.classList.toggle("spin", loading || Boolean(progress));
     sync.classList.toggle("warn", failed);
+    // Поверх списка — только счётчик: подробности в подсказке значка
+    const note = this.shadowRoot.getElementById("syncnote");
+    if (note) {
+      const text = progress && this._data ? `${progress.done} из ${progress.total}` : "";
+      note.hidden = !text;
+      if (note.textContent !== text) note.textContent = text;
+    }
     // Значок меняем, только когда он другой: перерисовка сбила бы вращение
     const icon = failed ? "syncAlert" : "sync";
     if (sync.dataset.icon !== icon) {
@@ -1279,6 +1346,24 @@ class YandexMenuPanel extends HTMLElement {
     );
   }
 
+  _loaderHtml() {
+    const progress = this._progressText();
+    if (!progress) return `<div class="loader"><div class="what">Читаю Яндекс-дом…</div></div>`;
+    const percent = Math.round((progress.done / progress.total) * 100);
+    // Предупреждаем, только когда ждать и правда долго: 30 ламп читаются за секунды
+    const hint =
+      progress.total > 100
+        ? `<div class="hint">Устройств много, а Яндекс отдаёт настройки каждого по отдельности,
+           поэтому первая загрузка идёт долго. Дальше панель будет открываться сразу.</div>`
+        : "";
+    return `<div class="loader" role="status">
+      <div class="what">${this._esc(progress.what)}</div>
+      <div class="left">${this._esc(progress.left)}</div>
+      <div class="bar"><i style="width:${percent}%"></i></div>
+      ${hint}
+    </div>`;
+  }
+
   _renderList() {
     const host = this.shadowRoot.getElementById("list");
     if (!host) return;
@@ -1291,7 +1376,7 @@ class YandexMenuPanel extends HTMLElement {
     if (!this._data) {
       host.innerHTML = this._error
         ? `<div class="fatal">${this._esc(this._error)}</div>`
-        : `<div class="loader">Читаю Яндекс-дом…</div>`;
+        : this._loaderHtml();
       return;
     }
 
