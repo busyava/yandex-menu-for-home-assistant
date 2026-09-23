@@ -314,8 +314,10 @@ list would be, and the icon is there to try again.
 
 **The first load takes long.** Yandex gives out each device's settings in a separate request, and
 Yandex Station keeps a pause between requests, so a home with several hundred devices takes
-minutes to read. The panel shows which home it is reading and how much is left. It remembers what
-it has read and opens at once from then on. **Refresh the list** (Обновить список) takes just as
+minutes to read. The list shows up at once (homes, rooms and main names), and the synonyms, the role
+and the link to Home Assistant are filled in row by row: a row still being read shimmers, and above
+the list you see which home is being read and how much is left. The panel remembers what it has
+read and opens at once from then on. **Refresh the list** (Обновить список) takes just as
 long, since it reads everything again.
 
 **The device did not appear after Expose to Alice (Отдать в Алису).** Most often the entity is

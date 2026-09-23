@@ -309,6 +309,28 @@ const STYLES = `
   .chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .chip { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
   .chip.primary { background: rgba(3,169,244,.16); color: var(--accent); font-weight: 500; }
+  /* строка черновика: настройки ещё читаются — по ней пробегает блик */
+  .row.pending .chip.ghost {
+    width: 64px; height: 1.5em; padding: 0;
+    background: linear-gradient(90deg, var(--surface-2) 25%, color-mix(in srgb, var(--surface-2) 40%, var(--primary-text-color) 12%) 50%, var(--surface-2) 75%);
+    background-size: 200% 100%; animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .row.pending .entity { font-family: inherit; font-style: italic; }
+  @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+  /* дочитанная строка проявляется */
+  .row.fresh .chips, .row.fresh .meta, .row.fresh .entity { animation: appear .6s ease-out; }
+  @keyframes appear { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .row.pending .chip.ghost { animation: none; }
+    .row.fresh .chips, .row.fresh .meta, .row.fresh .entity { animation: none; }
+  }
+  .reading {
+    margin: 0 0 14px; padding: 12px 14px; border-radius: 12px; background: var(--surface);
+    font-size: 13px; color: var(--muted); line-height: 1.45;
+  }
+  .reading b { color: var(--primary-text-color); font-weight: 500; }
+  .reading .bar { height: 4px; margin-top: 8px; border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+  .reading .bar i { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
   .role { font-size: 11.5px; color: var(--muted); }
   .role b { color: var(--primary-text-color); font-weight: 500; }
   .meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -450,6 +472,8 @@ class YandexMenuPanel extends HTMLElement {
     this._loading = 0; // сколько обновлений списка сейчас в пути
     this._savedAt = null; // на экране сохранённый список — когда его прочитали
     this._progress = null; // как далеко зашла сборка списка: дом, сколько прочитано
+    this._fresh = new Set(); // строки, дочитанные к этой отрисовке, — они проявляются
+    this._listTimer = null;
     this._unsubProgress = null;
     this._room = null; // открыта карточка комнаты вместо устройства
     // Карточка открывалась сменой поля и следа в истории браузера не оставляла:
@@ -524,6 +548,8 @@ class YandexMenuPanel extends HTMLElement {
       this._unsubProgress = null;
     }
     clearTimeout(this._toastTimer);
+    clearTimeout(this._listTimer);
+    this._listTimer = null;
     // Свою запись здесь не снимаем: history.back() посреди чужой навигации
     // отменил бы переход, который пользователь только что сделал.
   }
@@ -650,8 +676,14 @@ class YandexMenuPanel extends HTMLElement {
     this._unsubProgress = this._hass.connection.subscribeMessage(
       (state) => {
         this._progress = state || null;
+        if (state && state.preview) this._takePreview(state.preview);
+        if (state && state.ready) this._takeReady(state.ready);
         this._renderStatus();
-        if (!this._data && !this._error) this._renderList();
+        if (!this._data) {
+          if (!this._error) this._renderList();
+        } else if (this._data.partial || (state && state.ready)) {
+          this._scheduleList();
+        }
       },
       { type: "yandex_menu/progress" }
     );
@@ -660,6 +692,45 @@ class YandexMenuPanel extends HTMLElement {
       // без прогресса панель работает как раньше
       if (this._unsubProgress === mine) this._unsubProgress = null;
     });
+  }
+
+  /** Черновик списка: дома, комнаты и основные имена пришли одним запросом,
+      остальное дочитывается. Берём его, только когда показать нечего: сохранённый
+      список полнее черновика. */
+  _takePreview(preview) {
+    if (this._data) return;
+    this._data = preview;
+    this._syncHouse();
+    this._render();
+  }
+
+  /** Дочитанные строки — на место черновых (или поверх сохранённого списка). */
+  _takeReady(rows) {
+    const data = this._data;
+    if (!data || !data.devices) return;
+    const index = new Map(data.devices.map((device, position) => [device.id, position]));
+    for (const row of rows) {
+      const position = index.get(row.id);
+      if (position === undefined) {
+        if (!data.partial) continue; // в сохранённом списке такого нет — придёт с полным
+        index.set(row.id, data.devices.length);
+        data.devices.push(row);
+      } else {
+        if (data.devices[position].pending) this._fresh.add(row.id);
+        data.devices[position] = row;
+      }
+    }
+  }
+
+  /** Строки дочитываются пачками — перерисовываем не чаще раза в полсекунды. */
+  _scheduleList() {
+    if (this._listTimer) return;
+    this._listTimer = setTimeout(() => {
+      this._listTimer = null;
+      this._renderList();
+      this._renderHouses();
+      this._fresh.clear();
+    }, 500);
   }
 
   /** «около 3 минут» по оценке сервера. */
@@ -1291,7 +1362,8 @@ class YandexMenuPanel extends HTMLElement {
     // Поверх списка — только счётчик: подробности в подсказке значка
     const note = this.shadowRoot.getElementById("syncnote");
     if (note) {
-      const text = progress && this._data ? `${progress.done} из ${progress.total}` : "";
+      // над черновым списком своя полоска — счётчик в шапке её только дублировал бы
+      const text = progress && this._data && !this._data.partial ? `${progress.done} из ${progress.total}` : "";
       note.hidden = !text;
       if (note.textContent !== text) note.textContent = text;
     }
@@ -1346,6 +1418,25 @@ class YandexMenuPanel extends HTMLElement {
     );
   }
 
+  /** Полоска над черновым списком: что читаю и сколько осталось. */
+  _readingHtml() {
+    if (!this._data || !this._data.partial) return "";
+    const progress = this._progressText();
+    if (!progress) {
+      return this._error
+        ? `<div class="reading">Список дочитан не до конца: ${this._esc(this._error)}</div>`
+        : "";
+    }
+    const percent = Math.round((progress.done / progress.total) * 100);
+    const hint =
+      progress.total > 100
+        ? `<br>Яндекс отдаёт настройки каждого устройства по отдельности, поэтому первый раз это долго. Дальше панель будет открываться сразу.`
+        : "";
+    return `<div class="reading" role="status"><b>${this._esc(progress.what)}</b> · ${this._esc(
+      progress.left
+    )}. Строки с бликом ещё дочитываются.${hint}<div class="bar"><i style="width:${percent}%"></i></div></div>`;
+  }
+
   _loaderHtml() {
     const progress = this._progressText();
     if (!progress) return `<div class="loader"><div class="what">Читаю Яндекс-дом…</div></div>`;
@@ -1397,7 +1488,7 @@ class YandexMenuPanel extends HTMLElement {
       }
     }
 
-    let html = "";
+    let html = this._readingHtml();
     if (query && houseId) {
       // поиск идёт по открытому дому, но находки в других домах не прячем
       const elsewhere = this._houses
@@ -1443,11 +1534,16 @@ class YandexMenuPanel extends HTMLElement {
         const classes = ["row"];
         if (device.id === this._selected) classes.push("selected");
         if (this._isOn(device)) classes.push("lit");
+        if (device.pending) classes.push("pending");
+        if (this._fresh.has(device.id)) classes.push("fresh");
+        const entity = device.pending
+          ? "дочитываю настройки…"
+          : device.external_id || "устройство Яндекса";
         html += `<button class="${classes.join(" ")}" data-id="${device.id}">
           <span class="avatar">${this._svg(this._iconFor(device), 18)}</span>
           <span><span class="title">${this._esc(device.names[0])}</span><br>
-            <span class="entity">${this._esc(device.external_id || "устройство Яндекса")}</span></span>
-          <span class="chips">${chips}</span>
+            <span class="entity">${this._esc(entity)}</span></span>
+          <span class="chips">${chips}${device.pending ? `<span class="chip ghost" aria-hidden="true"></span>` : ""}</span>
           <span class="meta">
             <span class="skills">${this._skillIcons(device)}</span>
             <span class="role" title="${this._roleWord(device)}">${
@@ -1492,6 +1588,17 @@ class YandexMenuPanel extends HTMLElement {
         </div>`;
       }
       html += `</div></section>`;
+    }
+
+    if (this._data.partial) {
+      // сущности HA у части устройств ещё не известны — предлагать отдать рано
+      html += `<section><div class="room-head"><h2>Отдать в Алису</h2></div><div class="card"><div class="empty">
+        Появится, когда список дочитается: пока не видно, какие сущности Home Assistant уже в Алисе.
+      </div></div></section>`;
+      host.innerHTML = html;
+      host.scrollTop = keepScroll;
+      this._listShape = shape;
+      return;
     }
 
     const offer = this._offerHere();
@@ -1866,6 +1973,10 @@ class YandexMenuPanel extends HTMLElement {
         return;
       }
       const row = event.target.closest("[data-id]");
+      if (row && row.classList.contains("pending")) {
+        this._toast("Настройки этого устройства ещё читаются — откроется, как дочитаю");
+        return;
+      }
       if (row) {
         this._selected = row.getAttribute("data-id");
         this._room = null;
