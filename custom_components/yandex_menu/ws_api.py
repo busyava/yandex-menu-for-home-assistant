@@ -39,6 +39,7 @@ from .const import (
     DATA_CACHE_STORE,
     DATA_CONFIGS,
     DATA_DETAILS,
+    DATA_PREVIEW,
     DATA_PROGRESS,
     DATA_PROGRESS_LISTENERS,
     DATA_SAVED,
@@ -437,6 +438,7 @@ def _stop_build(hass: HomeAssistant) -> None:
     for task in list(data.get(DATA_BUILDS) or ()):
         task.cancel()
     data[DATA_BUILD] = None
+    data[DATA_PREVIEW] = None
     _publish_progress(hass, None)
 
 
@@ -491,11 +493,27 @@ def _touch(hass: HomeAssistant, *device_ids: str) -> None:
         _save_devices(hass, account_key(hass))
 
 
-def _publish_progress(hass: HomeAssistant, state: dict[str, Any] | None) -> None:
+def _publish_progress(
+    hass: HomeAssistant,
+    state: dict[str, Any] | None,
+    preview: dict[str, Any] | None = None,
+    ready: list[dict[str, Any]] | None = None,
+) -> None:
+    """Ход сборки — всем открытым панелям.
+
+    `preview` — черновик списка (уходит один раз, в начале), `ready` — строки,
+    дочитанные с прошлой отправки. Запоминаем только сам ход: опоздавшая панель
+    получит черновик целиком, уже с дочитанным.
+    """
     data = hass.data[DOMAIN]
     data[DATA_PROGRESS] = state
+    message = state
+    if state is not None and preview is not None:
+        message = {**state, "preview": preview}
+    elif state is not None and ready:
+        message = {**state, "ready": ready}
     for send in list(data.get(DATA_PROGRESS_LISTENERS) or ()):
-        send(state)
+        send(message)
 
 
 async def _build(hass: HomeAssistant) -> dict[str, Any]:
@@ -575,97 +593,9 @@ async def _build(hass: HomeAssistant) -> dict[str, Any]:
             store[device_id] = (time.time(), {})
         return result
 
-    house_names = {house["id"]: house["name"] for house in households}
-    todo = [
-        placed
-        for placed in flat
-        if config_hit(placed[0]) is None
-        or (needs_detail(placed[0]) and detail_hit(placed[0]) is None)
-    ]
-    started = time.monotonic()
-    progress = {"house": None, "done": 0, "total": len(todo), "left": None}
-    sent = 0.0
-    published = False
-    saved = time.monotonic()
-
-    def step(household_id: str | None, done: bool) -> None:
-        nonlocal sent, published, saved
-        now = time.monotonic()
-        if done and now - saved > SAVE_EVERY:
-            # долгая сборка сохраняет прочитанное по ходу: перезапуск HA посреди
-            # неё не должен начинать всё с нуля
-            saved = now
-            _save_devices(hass, owner)
-        if done:
-            progress["done"] += 1
-            # устройство могли поменять из панели уже после подсчёта — оно сверх плана
-            progress["total"] = max(progress["total"], progress["done"])
-        else:
-            progress["house"] = house_names.get(household_id)
-        count, total = progress["done"], progress["total"]
-        if count < total and now - sent < PROGRESS_EVERY:
-            return
-        sent = now
-        # Скорость упирается в паузу Станции, так что оценка по первым
-        # устройствам держится до конца
-        pace = (now - started) / count if count >= PARALLEL_CONFIG_REQUESTS else 0.3
-        progress["left"] = round(pace * (total - count))
-        published = True
-        _publish_progress(hass, dict(progress))
-
-    async def load(placed: Placed) -> tuple[dict | None, dict | None]:
-        device, _room, _room_id, household_id = placed
-        config = config_hit(device)
-        detail = detail_hit(device) if needs_detail(device) else None
-        if config is not None and (detail is not None or not needs_detail(device)):
-            return config, detail
-        async with semaphore:
-            step(household_id, done=False)
-            config, detail = await asyncio.gather(
-                remember(
-                    configs,
-                    device["id"],
-                    api.device_config(device["id"]),
-                    "Настройки",
-                    CONFIG_KEYS,
-                    household_id,
-                )
-                if config is None
-                else nothing(config),
-                remember(
-                    details,
-                    device["id"],
-                    api.device(device["id"]),
-                    "Карточка",
-                    DETAIL_KEYS,
-                    household_id,
-                )
-                if needs_detail(device) and detail is None
-                else nothing(detail),
-            )
-            step(household_id, done=True)
-        return config, detail
-
-    loads = [asyncio.ensure_future(load(placed)) for placed in flat]
-    try:
-        loaded = await asyncio.gather(*loads)
-    except BaseException:
-        # сборку отменили или она упала — остальным устройствам в Яндекс ходить незачем
-        for pending in loads:
-            pending.cancel()
-        raise
-    finally:
-        if published:
-            _publish_progress(hass, None)
-    if todo:
-        _save_devices(hass, owner)
-
-    devices: list[dict[str, Any]] = []
-    skill_id: str | None = None
-
-    for (device, room_name, room_id, household_id), (config, detail) in zip(
-        flat, loaded, strict=True
-    ):
+    def entry_of(placed: Placed, config: dict | None, detail: dict | None) -> dict[str, Any]:
+        device, room_name, room_id, household_id = placed
+        pending = config is None
         config = config or {}
         skills = _skills_of({**device, **(detail or {})})
         device_type = config.get("device_type") or {}
@@ -696,36 +626,24 @@ async def _build(hass: HomeAssistant) -> dict[str, Any]:
         }
         if from_ha:
             entry["ha_state"] = hass.states.get(external_id) is not None
-            _remember(snapshots, external_id, entry)
-            if not skill_id and config.get("skill_id"):
-                skill_id = config["skill_id"]
-        devices.append(entry)
+        if pending:
+            # настройки ещё не прочитаны: имена, роль и сущность HA придут позже
+            entry["pending"] = True
+        return entry
 
-    hass.data[DOMAIN][DATA_STORE].async_delay_save(
-        lambda: hass.data[DOMAIN][DATA_STORE_DATA], 5
-    )
-
-    label = _label_info(hass)
-    exposed = {
-        device["external_id"] for device in devices if device.get("external_id")
-    }
-    unexposed = _unexposed_entities(hass, exposed)
-
+    # Сценарии — один запрос, читаем до устройств: черновик списка ниже без них неполон
     try:
         scenarios = _scenarios_of(await api.scenarios())
     except QuasarError as err:
         _LOGGER.debug("Сценарии не прочитались: %s", err)
         scenarios = None
 
-    payload = {
-        "devices": devices,
+    common = {
         "households": households,
         "rooms": rooms,
-        "unexposed": unexposed,
-        "label": label,
+        "label": _label_info(hass),
         "snapshots": snapshots,
         "max_names": MAX_NAMES,
-        "skill_id": skill_id,
         "scenarios": scenarios,
         "stations": _stations(hass, flat),
         "account": {
@@ -733,11 +651,158 @@ async def _build(hass: HomeAssistant) -> dict[str, Any]:
             "several": len(station_entries(hass)) > 1,
         },
     }
+
+    house_names = {house["id"]: house["name"] for house in households}
+    todo = [
+        placed
+        for placed in flat
+        if config_hit(placed[0]) is None
+        or (needs_detail(placed[0]) and detail_hit(placed[0]) is None)
+    ]
+    started = time.monotonic()
+    progress = {
+        "house": house_names.get(todo[0][3]) if todo else None,
+        "done": 0,
+        "total": len(todo),
+        "left": None,
+    }
+    sent = 0.0
+    published = False
+    saved = time.monotonic()
+    ready: list[dict[str, Any]] = []  # дочитанные устройства, ещё не отправленные панели
+    preview: dict[str, Any] | None = None
+
+    if todo:
+        # Черновик: общий список Яндекс отдал одним запросом, в нём дома, комнаты
+        # и основные имена. Панель показывает его сразу и дочитывает по строкам.
+        preview = {
+            **common,
+            "devices": [
+                entry_of(
+                    placed,
+                    config_hit(placed[0]),
+                    detail_hit(placed[0]) if needs_detail(placed[0]) else None,
+                )
+                for placed in flat
+            ],
+            # пока сущности HA у части устройств не известны, предлагать отдать нечего
+            "unexposed": [],
+            "skill_id": _known_skill_id(hass),
+            "partial": True,
+        }
+        positions = {item["id"]: index for index, item in enumerate(preview["devices"])}
+        store_data[DATA_PREVIEW] = preview
+        published = True
+        _publish_progress(hass, {**progress, "left": round(0.3 * len(todo))}, preview=preview)
+
+    def step(household_id: str | None, entry: dict[str, Any] | None = None) -> None:
+        nonlocal sent, published, saved
+        now = time.monotonic()
+        done = entry is not None
+        if done and now - saved > SAVE_EVERY:
+            # долгая сборка сохраняет прочитанное по ходу: перезапуск HA посреди
+            # неё не должен начинать всё с нуля
+            saved = now
+            _save_devices(hass, owner)
+        if done:
+            progress["done"] += 1
+            # устройство могли поменять из панели уже после подсчёта — оно сверх плана
+            progress["total"] = max(progress["total"], progress["done"])
+            ready.append(entry)
+            if preview is not None and entry["id"] in positions:
+                # опоздавшая панель получит черновик уже с дочитанным
+                preview["devices"][positions[entry["id"]]] = entry
+        else:
+            progress["house"] = house_names.get(household_id)
+        count, total = progress["done"], progress["total"]
+        if count < total and now - sent < PROGRESS_EVERY:
+            return
+        sent = now
+        # Скорость упирается в паузу Станции, так что оценка по первым
+        # устройствам держится до конца
+        pace = (now - started) / count if count >= PARALLEL_CONFIG_REQUESTS else 0.3
+        progress["left"] = round(pace * (total - count))
+        published = True
+        _publish_progress(hass, dict(progress), ready=list(ready))
+        ready.clear()
+
+    async def load(placed: Placed) -> tuple[dict | None, dict | None]:
+        device, _room, _room_id, household_id = placed
+        config = config_hit(device)
+        detail = detail_hit(device) if needs_detail(device) else None
+        if config is not None and (detail is not None or not needs_detail(device)):
+            return config, detail
+        async with semaphore:
+            step(household_id)
+            config, detail = await asyncio.gather(
+                remember(
+                    configs,
+                    device["id"],
+                    api.device_config(device["id"]),
+                    "Настройки",
+                    CONFIG_KEYS,
+                    household_id,
+                )
+                if config is None
+                else nothing(config),
+                remember(
+                    details,
+                    device["id"],
+                    api.device(device["id"]),
+                    "Карточка",
+                    DETAIL_KEYS,
+                    household_id,
+                )
+                if needs_detail(device) and detail is None
+                else nothing(detail),
+            )
+            # не прочиталось — строка всё равно готова: лучше уже не будет
+            step(household_id, entry_of(placed, config or {}, detail))
+        return config, detail
+
+    loads = [asyncio.ensure_future(load(placed)) for placed in flat]
+    try:
+        loaded = await asyncio.gather(*loads)
+    except BaseException:
+        # сборку отменили или она упала — остальным устройствам в Яндекс ходить незачем
+        for pending in loads:
+            pending.cancel()
+        raise
+    finally:
+        if store_data.get(DATA_PREVIEW) is preview:
+            store_data[DATA_PREVIEW] = None
+        if published:
+            _publish_progress(hass, None)
+    if todo:
+        _save_devices(hass, owner)
+
+    devices: list[dict[str, Any]] = []
+    skill_id: str | None = None
+    for placed, (config, detail) in zip(flat, loaded, strict=True):
+        entry = entry_of(placed, config or {}, detail)
+        if entry["from_ha"]:
+            _remember(snapshots, entry["external_id"], entry)
+            if not skill_id and entry["skill_id"]:
+                skill_id = entry["skill_id"]
+        devices.append(entry)
+
+    hass.data[DOMAIN][DATA_STORE].async_delay_save(
+        lambda: hass.data[DOMAIN][DATA_STORE_DATA], 5
+    )
+
+    exposed = {
+        device["external_id"] for device in devices if device.get("external_id")
+    }
+    payload = {
+        **common,
+        "devices": devices,
+        "unexposed": _unexposed_entities(hass, exposed),
+        "skill_id": skill_id,
+    }
     if owner == account_key(hass):
         hass.data[DOMAIN][DATA_CACHE] = {"ts": time.time(), "payload": payload}
     _save_list(hass, payload, turn, owner)
     return payload
-
 
 def _save_list(
     hass: HomeAssistant, payload: dict[str, Any], turn: int, owner: str
@@ -1266,7 +1331,9 @@ def ws_progress(hass: HomeAssistant, connection, msg) -> None:
     listeners.add(send)
     connection.subscriptions[msg["id"]] = lambda: listeners.discard(send)
     connection.send_result(msg["id"])
-    send(hass.data[DOMAIN].get(DATA_PROGRESS))
+    state = hass.data[DOMAIN].get(DATA_PROGRESS)
+    preview = hass.data[DOMAIN].get(DATA_PREVIEW)
+    send({**state, "preview": preview} if state and preview else state)
 
 
 @callback
