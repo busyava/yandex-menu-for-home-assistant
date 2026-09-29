@@ -318,7 +318,8 @@ minutes to read. The list shows up at once (homes, rooms and main names), and th
 and the link to Home Assistant are filled in row by row: a row still being read shimmers, and above
 the list you see which home is being read and how much is left. The panel remembers what it has
 read and opens at once from then on. **Refresh the list** (Обновить список) takes just as
-long, since it reads everything again.
+long, since it reads everything again, but the list stays usable meanwhile: rows update in place
+and edits are saved right away.
 
 **The device did not appear after Expose to Alice (Отдать в Алису).** Most often the entity is
 `unavailable` or `unknown`, and Yandex does not take those. Bring it back to life and press

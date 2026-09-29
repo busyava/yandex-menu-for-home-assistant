@@ -464,6 +464,8 @@ class YandexMenuPanel extends HTMLElement {
     this._query = "";
     this._message = null;
     this._busy = false;
+    this._refreshing = false; // идёт «Обновить список» — список при этом рабочий
+    this._edits = 0; // сколько правок учёл список на экране (счёт сервера)
     this._loaded = false;
     // Список приходит из трёх мест: сохранённый, свежий и ответ на действие.
     // Каждый запрос получает номер, и на экране остаётся ответ самого позднего.
@@ -668,6 +670,27 @@ class YandexMenuPanel extends HTMLElement {
     return true;
   }
 
+  /** Долгая сборка шла минутами, а правки отвечали по ходу — ответ сборки
+      пришёл «старым» номером. Брать его можно, если он учёл все правки,
+      которые уже на экране: сервер считает их и пишет счёт в список. */
+  _covers(data) {
+    return Boolean(data) && typeof data.edits === "number" && data.edits >= this._edits;
+  }
+
+  /** На экране неполный список, а сборка уже кончилась — дочитывать его некому.
+      Так бывает, когда ответ на правку пришёл позже конца долгой сборки или
+      её ответ не взяли. Просим список ещё раз: всё прочитанное уже в памяти. */
+  _healPartial() {
+    if (!this._data || !this._data.partial || this._progress || this._loading > 0) return;
+    this._load(false);
+  }
+
+  _setData(data) {
+    this._data = data;
+    // не максимум: после перезапуска HA счёт сервера начинается с нуля
+    if (data && typeof data.edits === "number") this._edits = data.edits;
+  }
+
   /** Ход сборки списка. В большом доме первая сборка идёт минутами: Яндекс
       отдаёт настройки каждого устройства отдельно, и видно должно быть, что
       работа идёт, а не зависла. */
@@ -678,6 +701,7 @@ class YandexMenuPanel extends HTMLElement {
         this._progress = state || null;
         if (state && state.preview) this._takePreview(state.preview);
         if (state && state.ready) this._takeReady(state.ready);
+        if (!state) this._healPartial();
         this._renderStatus();
         if (!this._data) {
           if (!this._error) this._renderList();
@@ -796,8 +820,8 @@ class YandexMenuPanel extends HTMLElement {
     this._renderStatus();
     try {
       const data = await this._call("yandex_menu/list", { force });
-      if (this._take(seq)) {
-        this._data = data;
+      if (this._take(seq) || this._covers(data)) {
+        this._setData(data);
         this._savedAt = null;
         this._error = null;
         this._syncHouse();
@@ -807,10 +831,14 @@ class YandexMenuPanel extends HTMLElement {
       // На экране список новее этого запроса — ошибка к нему уже не относится.
       // Иначе она видна: без списка — во весь экран, при старом — значком в шапке.
       if (seq >= this._shown) this._error = err && err.message ? err.message : String(err);
-    } finally {
       this._loading -= 1;
+      this._render();
+      return; // при ошибке не повторяем — иначе без связи запросы шли бы по кругу
     }
+    this._loading -= 1;
     this._render();
+    // ответ не взяли, а на экране черновик — полный список сервер уже собрал
+    this._healPartial();
   }
 
   async _act(type, payload, successText) {
@@ -820,7 +848,7 @@ class YandexMenuPanel extends HTMLElement {
     try {
       const data = await this._call(type, payload);
       if (this._take(seq)) {
-        this._data = data;
+        this._setData(data);
         this._savedAt = null;
         this._error = null;
       }
@@ -830,11 +858,49 @@ class YandexMenuPanel extends HTMLElement {
       const notice = this._data && this._data.notice;
       if (notice) this._toast(notice);
       else if (successText) this._toast(successText);
+      this._healPartial();
     } catch (err) {
       const text = err && err.message ? err.message : String(err);
       this._message = { level: "error", text };
     } finally {
       this._busy = false;
+      this._render();
+    }
+  }
+
+  /** «Обновить список». В большом доме Яндекс перечитывается минутами, поэтому
+      экран не блокируем: список остаётся рабочим, строки обновляются на месте,
+      ход виден в шапке. Правки по ходу отвечают сразу, не дожидаясь конца. */
+  async _refresh() {
+    if (this._refreshing) return;
+    const seq = ++this._seq;
+    this._refreshing = true;
+    this._loading += 1;
+    this._message = null;
+    this._render();
+    this._toast("Перечитываю список у Яндекса — можно работать дальше");
+    try {
+      const data = await this._call("yandex_menu/discovery", {});
+      // Правки по ходу отвечали сами. Перечитанное берём, если оно их учло;
+      // иначе на экране и так свежее, а строки уже обновились по ходу.
+      if (this._take(seq) || this._covers(data)) {
+        this._setData(data);
+        this._savedAt = null;
+        this._error = null;
+        this._syncHouse();
+        this._dropGoneCard();
+      } else {
+        // перечитанное учло не все правки — просим список ещё раз, он соберётся из памяти
+        setTimeout(() => this._load(false), 0);
+      }
+      this._toast(data && data.notice ? data.notice : "Список обновлён");
+    } catch (err) {
+      // список на экране остаётся прежним: ошибка — жёлтым значком в шапке и всплывашкой
+      this._error = err && err.message ? err.message : String(err);
+      this._toast(`Список не обновился: ${this._error}`);
+    } finally {
+      this._refreshing = false;
+      this._loading -= 1;
       this._render();
     }
   }
@@ -1379,6 +1445,11 @@ class YandexMenuPanel extends HTMLElement {
     sync.classList.toggle("spin", loading || Boolean(progress));
     sync.classList.toggle("warn", failed);
     // Поверх списка — только счётчик: подробности в подсказке значка
+    const discover = this.shadowRoot.getElementById("discover");
+    if (discover) {
+      discover.disabled = this._refreshing;
+      discover.textContent = this._refreshing ? "Обновляю…" : "Обновить список";
+    }
     const note = this.shadowRoot.getElementById("syncnote");
     if (note) {
       // над черновым списком своя полоска — счётчик в шапке её только дублировал бы
@@ -1982,7 +2053,7 @@ class YandexMenuPanel extends HTMLElement {
     });
 
     root.getElementById("discover").addEventListener("click", () => {
-      this._act("yandex_menu/discovery", {}, "Яндекс перечитывает список устройств");
+      this._refresh();
     });
 
     root.getElementById("list").addEventListener("click", (event) => {
