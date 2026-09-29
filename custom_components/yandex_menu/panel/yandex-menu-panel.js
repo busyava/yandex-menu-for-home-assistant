@@ -878,7 +878,6 @@ class YandexMenuPanel extends HTMLElement {
     this._loading += 1;
     this._message = null;
     this._render();
-    this._toast("Перечитываю список у Яндекса — можно работать дальше");
     try {
       const data = await this._call("yandex_menu/discovery", {});
       // Правки по ходу отвечали сами. Перечитанное берём, если оно их учло;
