@@ -9,6 +9,7 @@ import logging
 import re
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import voluptuous as vol
@@ -940,6 +941,63 @@ def _yaha_can_export(hass: HomeAssistant) -> Callable[[str, State | None], bool]
     return by_yaha
 
 
+def _yaha_misreads_own_name(hass: HomeAssistant, entity_id: str, marker: Any) -> bool:
+    """Испортит ли служебная отметка псевдонимов имя устройства в Яндексе.
+
+    Спрашиваем у самого Yandex Smart Home, как он назовёт устройство с отметкой
+    и без неё: его версии читают отметку по-разному — одни пропускают, другие
+    на ней спотыкаются или принимают её за имя. Если его внутренности
+    недоступны, считаем, что испортит, — так устройство точно не получит
+    в Яндексе чужое имя.
+    """
+    module = sys.modules.get(f"custom_components.{YAHA_DOMAIN}.device")
+    component = hass.data.get(YAHA_DOMAIN)
+    entry = yaha_entry(hass)
+    if module is None or component is None or entry is None:
+        return True
+    try:
+        state = hass.states.get(entity_id) or State(entity_id, "unknown")
+        device = module.Device(hass, component.get_entry_data(entry), entity_id, state)
+        plain = device._get_name(SimpleNamespace(aliases=[]))  # noqa: SLF001
+        marked = device._get_name(SimpleNamespace(aliases=[marker]))  # noqa: SLF001
+    except Exception:  # noqa: BLE001 — споткнулся на отметке или устроен иначе
+        return True
+    return marked != plain
+
+
+def _fix_aliases(hass: HomeAssistant, registry: er.EntityRegistry, entity_id: str) -> None:
+    """Псевдонимы перед выдачей в Алису.
+
+    С Home Assistant 2026 в псевдонимах лежит служебная отметка «собственное
+    имя сущности» (в файле реестра — null). Старые версии Yandex Smart Home
+    её не понимают: устройство не уходит в Яндекс или получает имя «0».
+    Отметку убираем, только когда она и правда мешает: без неё голосовой
+    помощник Home Assistant перестаёт узнавать сущность по собственному имени.
+    Остальные псевдонимы и их порядок не трогаем.
+    """
+    entity = registry.async_get(entity_id)
+    aliases = entity.aliases if entity else None
+    if not aliases:
+        return
+    marker = getattr(er, "COMPUTED_NAME", None)
+    drop_marker: bool | None = None
+    clean = []
+    for alias in aliases:
+        if isinstance(alias, str):
+            if alias.strip():
+                clean.append(alias)
+        elif marker is not None and alias is marker:
+            if drop_marker is None:
+                drop_marker = _yaha_misreads_own_name(hass, entity_id, marker)
+            if not drop_marker:
+                clean.append(alias)
+    if len(clean) == len(aliases):
+        return
+    # до Home Assistant 2026 псевдонимы были множеством, теперь это список
+    registry.async_update_entity(entity_id, aliases=type(aliases)(clean))
+    _LOGGER.debug("Почистил псевдонимы %s: теперь %s", entity_id, clean)
+
+
 def _unexposed_entities(
     hass: HomeAssistant, exposed: set[str]
 ) -> list[dict[str, Any]]:
@@ -1263,22 +1321,9 @@ async def ws_expose(hass: HomeAssistant, connection, msg) -> None:
         if not entity:
             raise QuasarError(f"Сущности {msg['entity_id']} нет в реестре.")
 
-        # В реестре встречается мусорный псевдоним [null]: Yaha берёт его как
-        # имя и Яндекс заводит устройство под названием «0». Чистим до выдачи.
         if msg["expose"]:
-            clean = {
-                alias
-                for alias in (entity.aliases or set())
-                if isinstance(alias, str) and alias.strip()
-            }
-            if clean != set(entity.aliases or set()):
-                registry.async_update_entity(msg["entity_id"], aliases=clean)
-                entity = registry.async_get(msg["entity_id"])
-                _LOGGER.debug(
-                    "Почистил псевдонимы %s: теперь %s",
-                    msg["entity_id"],
-                    entity.aliases,
-                )
+            _fix_aliases(hass, registry, msg["entity_id"])
+            entity = registry.async_get(msg["entity_id"])
 
         labels = set(entity.labels)
         if msg["expose"]:
@@ -1338,20 +1383,43 @@ async def ws_withdraw(hass: HomeAssistant, connection, msg) -> None:
     await _reply(hass, connection, msg, run(), touch=msg["device_id"])
 
 
+_BLINKING: set[str] = set()  # устройства, которые мигают прямо сейчас
+
+
+async def _blink(api: QuasarApi, device_id: str, on: bool | None) -> None:
+    """Мигнуть и вернуть как было. Ответа панель не ждёт — ошибку пишем в журнал."""
+    # Второе нажатие, пока устройство мигает, застало бы его в перевёрнутом
+    # состоянии и в нём же оставило.
+    if device_id in _BLINKING:
+        return
+    _BLINKING.add(device_id)
+    try:
+        await api.blink(device_id, was_on=bool(on))
+    except QuasarError as err:
+        _LOGGER.warning("Не получилось мигнуть устройством %s: %s", device_id, err)
+    finally:
+        _BLINKING.discard(device_id)
+
+
 @websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "yandex_menu/blink",
         vol.Required("device_id"): str,
+        # горит ли устройство сейчас; панель шлёт это, только когда знает наверняка
+        vol.Optional("on"): bool,
     }
 )
 @websocket_api.async_response
 async def ws_blink(hass: HomeAssistant, connection, msg) -> None:
     try:
-        hass.async_create_task(_api(hass).blink(msg["device_id"]))
+        api = _api(hass)
     except QuasarError as err:
         connection.send_error(msg["id"], "quasar_error", str(err))
         return
+    hass.async_create_background_task(
+        _blink(api, msg["device_id"], msg.get("on")), "yandex_menu blink"
+    )
     connection.send_result(msg["id"], {"ok": True})
 
 
