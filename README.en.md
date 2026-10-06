@@ -39,11 +39,23 @@ too — that is what the main and secondary light roles on a lamp are for.
 
 ## Features
 
+### Recalling what a device is called
+
+- **What is on right now.** A switch above the list: **All / On** (Все / Включено). The second view
+  keeps only the devices that are on at this moment, and the number on the button updates by itself.
+- **Flip it and see the name.** Cannot remember what a lamp is called? Turn it on or off by hand.
+  In the "On" view it shows up at the top straight away, in the **Just now** block (Только что),
+  with the name it answers to.
+- **Search.** Looks through names, Home Assistant entities and rooms: typing a room name shows
+  everything in that room. Words can go in any order, and "е" and "ё" are treated as the same letter.
+- **"Name it so"** (Назвать так). If the word you searched for was not found, nothing in Yandex is
+  called that. The panel offers to pick the device you call that way and adds the name to it.
+
 ### Names, rooms and the light role
 
-- **Voice names.** Up to five per device. The panel warns you when a new name duplicates another
-  one or overlaps it: when one name sits inside another ("Ambient light" inside "Sofa ambient
-  light"), Alice acts on the shorter one.
+- **Voice names.** Up to five per device. When a new name duplicates another one or overlaps it,
+  the panel warns you first and adds the name only on the second press: when one name sits inside
+  another ("Ambient light" inside "Sofa ambient light"), Alice acts on the shorter one.
 - **Main and secondary light.** The role switch — the fix for "turn on the light". Yandex lets you
   change the role only on some lamps — where it cannot be changed, the card simply has no switch.
 - **Room** (Комната). Moves a device between Yandex rooms — the same ones you have in the Yandex
@@ -84,7 +96,8 @@ too — that is what the main and secondary light roles on a lamp are for.
   away after you change something from the panel. Yandex's own devices are not covered.
 - **The blink check.** Lights, sockets and switches have a button that turns the device on for
   three seconds and off again — handy when a room has three identical lamps and you cannot tell
-  which is which. Curtains, kettles and sensors have no such button.
+  which is which. If the device was already on, it goes off for three seconds and comes back on
+  instead. Curtains, kettles and sensors have no such button.
 
 ### When there is more than one account or home
 
@@ -139,6 +152,24 @@ synonyms and the role. A device that is switched on has its icon highlighted. Cl
 opens its card on the right. On a phone the system back button closes the card as well: the first
 press closes the card, the second takes you off the panel (and if you opened the device from a room
 card, back takes you there first).
+
+Above the list there is the **All / On** switch. The "On" view answers the question "what is on
+right now and what is it called": it has only the devices that are on, without scenarios and
+without the expose section. Switch something by hand — a wall switch, a remote, Home Assistant —
+and the device appears at the top in the **Just now** block, marked as just turned on or off; the
+entry stays for a couple of minutes. This works for devices that have a Home Assistant entity: the
+panel watches those live. For the rest it knows only what Yandex reported when the list was last
+read, and in this view they carry the note "по данным Яндекса" (according to Yandex). Searching in
+the "On" view looks among the devices that are on; if a match is among those that are off, a
+separate line says so.
+
+### Search and "Name it so"
+
+The search looks at every name of a device, at its entity and at its room. If neither a device nor
+a scenario was found and the query is a Russian word, the panel shows the **Name it so** block
+(Назвать так) with all devices of the home, those that are on first. Click the one you call that
+way — its card opens with the word already in the new-name field. All that is left is to press
+"Добавить" (Add).
 
 Yandex takes its time with the list: a home of thirty-odd devices needs about ten seconds. So the
 panel opens with the list it read last time and fetches a fresh one by itself. While that is going
@@ -262,9 +293,9 @@ connection appears for that.
 
 The panel page in the browser makes no outside calls at all — it talks only to your Home Assistant
 over its usual connection, and it is the server that goes to Yandex. In the browser itself it
-remembers two small things: which home is open and which Station is picked for testing phrases (the
-keys `yandex_menu.house` and `yandex_menu.station`). Those entries stay in the browser and go
-nowhere.
+remembers three small things: which home is open, which Station is picked for testing phrases and
+which view of the list is on (the keys `yandex_menu.house`, `yandex_menu.station` and
+`yandex_menu.view`). Those entries stay in the browser and go nowhere.
 
 The integration keeps three files on disk in Home Assistant.
 `config/.storage/yandex_menu.snapshots` holds the snapshots: a device's names, its room and its
