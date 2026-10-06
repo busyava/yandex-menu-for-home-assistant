@@ -163,6 +163,8 @@ read, and in this view they carry the note "по данным Яндекса" (a
 the "On" view looks among the devices that are on; if a match is among those that are off, a
 separate line says so.
 
+![The "On" view: the "Just now" block on top with the devices that were just switched, and everything that is on below, room by room](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/on.png)
+
 ### Search and "Name it so"
 
 The search looks at every name of a device, at its entity and at its room. If neither a device nor
@@ -170,6 +172,8 @@ a scenario was found and the query is a Russian word, the panel shows the **Name
 (Назвать так) with all devices of the home, those that are on first. Click the one you call that
 way — its card opens with the word already in the new-name field. All that is left is to press
 "Добавить" (Add).
+
+![The "Name it so" block: the search found nothing, and the panel offers to pick the device that should get this name](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/nameit.png)
 
 Yandex takes its time with the list: a home of thirty-odd devices needs about ten seconds. So the
 panel opens with the list it read last time and fetches a fresh one by itself. While that is going
