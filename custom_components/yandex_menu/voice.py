@@ -88,6 +88,9 @@ def payload_matches(scenario, launch):
 
 
 def in_home(scenario, home):
+    # Сценарий без дома Яндекс показывает во всех домах — значит, он и в этом
+    if not scenario.get("household_ids") and not scenario.get("household_id"):
+        return True
     return home in scenario.get("household_ids", []) or scenario.get("household_id") == home
 
 
@@ -713,7 +716,7 @@ class VoiceManager:
         for scenario in self.cloud:
             # Сценарий без дома Яндекс показывает во всех домах, как и панель.
             shared = not scenario.get("household_ids") and not scenario.get("household_id")
-            if (in_home(scenario, home) or shared) and scenario.get("id") != launch.get("scenario_id"):
+            if (in_home(scenario, home) or shared) and scenario.get("id") != launch.get("scenario_id") and not owns_code(scenario, launch):
                 used.update(normalized(t.get("value", "")) for t in scenario.get("triggers", []) if t.get("type") == "scenario.trigger.voice")
         if used.intersection(norms):
             errors.append("Фраза занята другим сценарием в этом доме")
