@@ -111,8 +111,11 @@ too — that is what the main and secondary light roles on a lamp are for.
 | Requirement | Why |
 |---|---|
 | Home Assistant 2024.8 or newer | Uses the current way of registering a panel |
-| [Yandex Station](https://github.com/AlexxIT/YandexStation) (AlexxIT) | **Required.** This is where access to the Yandex home comes from: it keeps cookies and tokens fresh by itself |
+| [Yandex Station](https://github.com/AlexxIT/YandexStation) (AlexxIT), **3.22.3 or newer** | **Required.** This is where access to the Yandex home comes from: it keeps cookies and tokens fresh by itself |
+| Music Assistant server and Home Assistant integration | Required only for voice media launches; the rest of the panel works without it |
 | [Yandex Smart Home](https://github.com/dext0r/yandex_smart_home) (dext0r) | Needed to expose Home Assistant entities to Alice. Without it the panel still shows and edits your devices, but there is nothing to add |
+
+Yandex changed its CSRF token address in October 2026; writing changes requires Yandex Station 3.22.3 or newer.
 
 If you use Yandex Smart Home and want to add devices straight from the panel, the Yandex Smart
 Home entity filter has to be set to **label** mode — the label is exactly what the panel puts on
@@ -246,7 +249,70 @@ press **Refresh the list** (Обновить список).
 If you have several homes, this section is only visible in the home that already holds devices from
 Home Assistant.
 
+## Play by voice
+
+The **Включить голосом** (Play by voice) block follows Scenarios. Its collapsed **Библиотека**
+(Library) group lists top-level folders from Music Assistant file providers. New folders show
+**Ждёт активации** (Waiting for activation): nothing is written to Yandex automatically.
+Open a card, enter one to **four phrases** — Yandex's limit — and press **Активировать**
+(Activate). For a Beatles folder you could use “включи битлов”. Suggestion chips fill an empty
+phrase field and can be edited. Duplicate phrases block saving; warnings need a second press.
+
+An album plays in full. An audiobook resumes where it stopped, using MA's saved position,
+shared by the household. An artist folder containing several albums plays those albums in
+subfolder date order, falling back to name order. Alice's pause and sleep timer preserve the
+book position. **Добавить** (Add) creates a manual card: search MA and select a result.
+
+Choose Alice's “Включаю ‹title›” reply or silence. **Проверить** (Test) uses the selected
+speaker and shows the latest result. A spoken phrase plays on the speaker that heard it.
+Expand **Колонки и облачные обновления** (Speakers and cloud updates) to check mappings
+and select an MA player manually when necessary.
+
+Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
+“Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”
+(media is missing). A phrase launched from the app or a phone may have no matching speaker.
+
+**Отключить** (Deactivate) removes the Yandex scenario and keeps the card ready for activation.
+**Не показывать** (Hide) permanently excludes a folder; refreshing the library will not bring it back. An active folder that disappears is marked
+**Папка пропала** (Folder missing); its scenario is never deleted automatically. Remove it
+from its card or use **Удалить пропавшие** (Delete missing), with confirmation.
+
+## Your own files on a speaker
+
+The panel connects Alice phrases to your library. Set up the MA server, integration, file
+providers and speakers yourself; allow around 20–30 minutes.
+
+1. Install the **Music Assistant** server (HAOS app or Docker), then add its integration to HA.
+2. In MA add **Home Assistant MediaPlayers**, select your Yandex Station entities and use
+   the **MP3** codec. Expose the MA players as entities in Home Assistant. The panel's status
+   section shows the mappings and allows manual selection.
+3. Put files in HA's `/media`, or connect a NAS in **Settings → System → Storage → Add network
+   storage**, choosing **Media** as the usage type.
+4. Add a **Filesystem** provider in MA pointing at that folder. **Keep books in a separate
+   folder and a separate MA provider with the Audiobooks content type.** In a music provider,
+   chapters become ordinary tracks and the book will not resume from its saved position.
+   One book can be a folder of numbered chapters with matching `album`/`artist` tags, or a
+   single `.m4b` file.
+5. Scan the provider and check that the album or book appears in MA, then activate its card
+   in **Включить голосом → Библиотека**.
+
+> Known MA 2.10.x limitation: its native **Yandex Station** provider may play the wrong stream
+> ([fix #5605](https://github.com/music-assistant/server/pull/5605)). Use **Home Assistant
+> MediaPlayers** for now.
+
+Folders starting with `_` or `.` are hidden. The panel checks MA for new folders every ten
+minutes. MA normally scans files every twelve hours. **Обновить библиотеку** (Refresh library)
+requests a scan of the file providers, waits for completion and reads the library again. If a
+scan cannot be started, the panel says MA will scan on its own schedule. Progress and cancellation
+are available while refreshing.
+
 ## Good to know
+
+Voice launches create Yandex scenarios ending in **· Яндекс меню**. They are compatible with
+**Yandex.Station Intents** and are hidden from the panel's ordinary scenario list. A voice launch
+replaces whatever is playing on that speaker, including Yandex Music. If HA is off, Alice may
+say “Включаю” but no audio follows: the cloud speaks the reply and HA starts playback.
+
 
 The integration works through the same private API the Yandex app uses. It has no official
 documentation, and Yandex can change it without warning — the panel will then need fixing. Almost
@@ -278,6 +344,12 @@ a search too.
 
 ## What goes out, and where
 
+Voice launches also create, update and delete Yandex scenarios: their names, phrases and Alice's
+reply with a launch marker. The library and search are read from your local Music Assistant.
+Launch settings and speaker mappings are stored in `config/.storage/yandex_menu.voice_launches`,
+without passwords or tokens.
+
+
 The integration reaches out to one place only — the Yandex cloud at `iot.quasar.yandex.ru`, the
 same one the Yandex app talks to. There are no other addresses in the code, the integration
 installs no third-party libraries, and it sends no statistics about you anywhere.
@@ -301,7 +373,7 @@ remembers three small things: which home is open, which Station is picked for te
 which view of the list is on (the keys `yandex_menu.house`, `yandex_menu.station` and
 `yandex_menu.view`). Those entries stay in the browser and go nowhere.
 
-The integration keeps three files on disk in Home Assistant.
+Besides voice launch settings, the integration keeps three files on disk in Home Assistant.
 `config/.storage/yandex_menu.snapshots` holds the snapshots: a device's names, its room and its
 light role. They are there so you can put the settings back if Yandex recreates a device — the
 button puts back the names and the role, and leaves the room as it is.
@@ -315,6 +387,11 @@ The panel and all its commands are open to Home Assistant administrators only: a
 sees neither the sidebar item nor the data.
 
 ## How to remove it
+
+First press **Отключить все запуски** (Deactivate all launches) in the voice block and confirm
+scenario removal. Delete any orphan scenarios shown in that block separately. Removing the
+integration does not automatically remove its scenarios from Yandex.
+
 
 **Settings → Devices & services → Яндекс меню → Delete.** The sidebar item disappears at once. If
 you installed through HACS, delete the **Yandex Menu for Home Assistant** repository there as well;
