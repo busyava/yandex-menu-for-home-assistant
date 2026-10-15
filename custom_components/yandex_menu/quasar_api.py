@@ -132,8 +132,23 @@ class QuasarApi:
         return data.get("scenarios", [])
 
     async def scenarios_list(self) -> list[dict[str, Any]]:
-        """Полные сценарии, включая шаг с нашим маркером."""
-        return await self.scenarios()
+        """Полный список сценариев с именами и триггерами, без шагов."""
+        data = await self._request("get", "/m/user/scenarios")
+        scenarios = data.get("scenarios")
+        if not isinstance(scenarios, list) or any(
+            not isinstance(scenario, dict) or not scenario.get("id")
+            for scenario in scenarios
+        ):
+            raise ValueError("Яндекс не вернул полный список сценариев")
+        return scenarios
+
+    async def scenario_get(self, scenario_id: str) -> dict[str, Any]:
+        """Полный сценарий из формы редактирования, включая шаги."""
+        data = await self._request("get", f"/m/v4/user/scenarios/{scenario_id}/edit")
+        scenario = data.get("scenario")
+        if not isinstance(scenario, dict):
+            raise ValueError("Яндекс не вернул полный сценарий")
+        return scenario
 
     async def scenario_create(self, body: dict[str, Any]) -> dict[str, Any]:
         return await self._request("post", "/m/v4/user/scenarios", body)

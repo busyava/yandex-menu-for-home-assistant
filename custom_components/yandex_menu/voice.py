@@ -21,6 +21,7 @@ from .accounts import account_key, station_entry
 from .const import DATA_CACHE_OWNER, DATA_CONFIGS, DOMAIN
 from . import library
 from .voice_store import VoiceStore
+from .quasar_api import QuasarError
 
 _LOGGER = logging.getLogger(__name__)
 MARKER = re.compile(r";;([,.:]+)$")
@@ -31,7 +32,7 @@ def clean(value):
 
 
 def make_code(key, account, household):
-    number = int.from_bytes(hashlib.sha256(f"{account}\0{household}\0{key}".encode()).digest()[:8], "big")
+    number = int.from_bytes(hashlib.sha256(f"{account}\0{household}\0{key}".encode()).digest()[:4], "big")
     result = ""
     while number:
         number, digit = divmod(number, 3)
@@ -40,7 +41,7 @@ def make_code(key, account, household):
 
 
 def scenario_body(launch):
-    title = " ".join(re.sub(r"[\W_]", " ", clean(launch["title"])).split())
+    title = library.clean_title(launch["title"], audiobook=launch.get("media", {}).get("media_type") == "audiobook")
     suffix = ";;" + launch["code"]
     silent = launch.get("reply") == "silent"
     value = ("ничего не делай" if silent else "Включаю " + title)[:100-len(suffix)] + suffix
@@ -65,6 +66,14 @@ def scenario_code(scenario):
             if match and "---" not in value:
                 return match.group(1)
     return None
+
+
+def launch_codes(launch):
+    return {c for c in (launch.get("code"), launch.get("previous_code")) if c}
+
+
+def owns_code(scenario, launch):
+    return scenario_code(scenario) in launch_codes(launch)
 
 
 def payload_matches(scenario, launch):
@@ -119,6 +128,7 @@ class VoiceManager:
         self.commands = set()
         self.closed = False
         self.cloud = []
+        self.scenario_cache = {}
         self.devices = []
         self.households = []
         self.results = {}
@@ -241,11 +251,60 @@ class VoiceManager:
         if self.closed:
             raise ValueError("Голосовые запуски отключены — откройте панель заново")
 
+    def owns_scenario(self, scenario, launch):
+        """Если форма недоступна, доверяем только сохранённому id в том же доме."""
+        if not in_home(scenario, launch.get("household_id")):
+            return False
+        code = scenario_code(scenario)
+        if code is not None:
+            return code in launch_codes(launch)
+        return bool(scenario.get("_detail_unavailable")
+                    and scenario.get("id") == launch.get("scenario_id")
+                    and scenario.get("name", "").endswith(" · Яндекс меню"))
+
+    async def mutate_scenario(self, method, *args):
+        # Потерянный ответ тоже может означать успешную запись.
+        self.scenario_cache.clear()
+        try:
+            return await getattr(self.api, method)(*args)
+        finally:
+            self.scenario_cache.clear()
+
     async def read_cloud(self):
         self._check_account()
-        self.cloud = await self.api.scenarios_list()
-        if isinstance(self.cloud, dict):
-            self.cloud = self.cloud.get("scenarios", [])
+        listing = await self.api.scenarios_list()
+        if isinstance(listing, dict):
+            listing = listing.get("scenarios")
+        if not isinstance(listing, list) or any(not isinstance(s, dict) or not s.get("id") for s in listing):
+            raise ValueError("Яндекс не вернул полный список сценариев")
+        present = {s["id"] for s in listing}
+        self.scenario_cache = {ident: cached for ident, cached in self.scenario_cache.items() if ident in present}
+        cloud = []
+        for summary in listing:
+            scenario = deepcopy(summary)
+            if scenario.get("name", "").endswith(" · Яндекс меню"):
+                ident = scenario["id"]
+                fingerprint = json.dumps({key: scenario.get(key) for key in
+                                          ("name", "triggers", "household_id", "household_ids")},
+                                         sort_keys=True, ensure_ascii=False)
+                cached = self.scenario_cache.get(ident)
+                try:
+                    if cached and cached[0] == fingerprint:
+                        detail = cached[1]
+                    else:
+                        detail = await self.api.scenario_get(ident)
+                        if not isinstance(detail, dict) or not isinstance(detail.get("steps"), list):
+                            raise ValueError("Яндекс не вернул шаги сценария")
+                        self.scenario_cache[ident] = (fingerprint, deepcopy(detail))
+                    # Свежий список определяет имя, фразы и дом; форма нужна для шагов.
+                    scenario["steps"] = deepcopy(detail["steps"])
+                except Exception:
+                    self.scenario_cache.pop(ident, None)
+                    scenario.pop("steps", None)
+                    scenario["_detail_unavailable"] = True
+                    _LOGGER.debug("Не удалось прочитать шаги сценария %s", ident, exc_info=True)
+            cloud.append(scenario)
+        self.cloud = cloud
         raw = await self.api.devices()
         self.households = raw.get("households", [])
         self.devices = []
@@ -257,10 +316,15 @@ class VoiceManager:
                 self.devices.append({**dev, "household_id": home["id"]})
         changed = False
         for launch in self.launches.values():
-            found = [s for s in self.cloud if scenario_code(s) == launch.get("code") and in_home(s, launch.get("household_id"))]
-            if len(found) == 1 and launch.get("state") in ("pending", "error") and (not launch.get("cloud_dirty") or payload_matches(found[0], launch)):
-                launch.update(scenario_id=found[0]["id"], state="active", last_error=None, cloud_dirty=False)
-                changed = True
+            found = [s for s in self.cloud if owns_code(s, launch) and in_home(s, launch.get("household_id"))]
+            if len(found) == 1 and launch.get("state") in ("pending", "error"):
+                if launch.get("scenario_id") != found[0]["id"]:
+                    launch["scenario_id"] = found[0]["id"]
+                    changed = True
+                if not launch.get("cloud_dirty") or payload_matches(found[0], launch):
+                    launch.update(state="active", last_error=None, cloud_dirty=False)
+                    launch.pop("previous_code", None)
+                    changed = True
         if changed:
             await self.store.save()
         self.cloud_recovery_needed = False
@@ -329,7 +393,11 @@ class VoiceManager:
             match = MARKER.search(value)
             if not match or "---" in value:
                 return
-            launch = next((l for l in self.launches.values() if l.get("code") == match.group(1) and l.get("scenario_id") and l.get("state") in ("active", "missing", "pending", "error")), None)
+            speaker = next((s for s in self.speaker_rows() if s["entity_id"] == data.get("entity_id")), None)
+            if not speaker or not speaker.get("household_id"):
+                return
+            matches = [l for l in self.launches.values() if match.group(1) in launch_codes(l) and l.get("household_id") == speaker["household_id"] and l.get("scenario_id") and l.get("state") in ("active", "missing", "pending", "error")]
+            launch = matches[0] if len(matches) == 1 else None
             if not launch:
                 return
             self.task(self.dispatch_voice(launch, data.get("entity_id")))
@@ -523,7 +591,7 @@ class VoiceManager:
                 if not launch.get("title_override"):
                     launch["title"] = item["title"]
                 launch["source_title"] = item["title"]
-                launch.update(key=item["key"], media=item["media"], identities=item.get("identities", []), provider_instance=item.get("provider_instance"), missing_since=None, missing_confirmed=False)
+                launch.update(key=item["key"], media=item["media"], identities=item.get("identities", []), provider_instance=item.get("provider_instance"), source_name=item.get("source_name"), albums=deepcopy(item.get("albums", [])), missing_since=None, missing_confirmed=False)
                 if launch["state"] == "missing":
                     launch["state"] = "active" if launch.get("scenario_id") else "waiting"
         for ident, launch in list(self.launches.items()):
@@ -550,7 +618,7 @@ class VoiceManager:
                 self.library_state["error"] = str(err)
                 return self.library_state
             for launch in renamed:
-                found = next((s for s in self.cloud if s.get("id") == launch.get("scenario_id") and scenario_code(s) == launch.get("code") and in_home(s, launch.get("household_id"))), None)
+                found = next((s for s in self.cloud if s.get("id") == launch.get("scenario_id") and self.owns_scenario(s, launch)), None)
                 if not found:
                     continue
                 try:
@@ -585,18 +653,30 @@ class VoiceManager:
                 self.scanning = {t.get("provider_instance") if isinstance(t, dict) else getattr(t, "provider_instance", None) for t in values}
         self.mass_unsubscribe = mass.subscribe(updated, ("sync_tasks_updated",))
 
+    def refuse_unverified_create(self, launch, body):
+        # Имя не доказывает владение и не позволяет привязать id. Но пока
+        # шаги кандидата недоступны, новый POST может продублировать потерянный.
+        if any(s.get("_detail_unavailable") and s.get("name") == body["name"]
+               and s.get("name", "").endswith(" · Яндекс меню")
+               and in_home(s, launch["household_id"]) for s in self.cloud):
+            raise QuasarError(
+                "Не удалось проверить существующий сценарий. Обновите список и повторите сохранение",
+                temporary=True)
+
     async def write_scenario(self, launch, body):
         for attempt in range(2):
+            if not launch.get("scenario_id"):
+                self.refuse_unverified_create(launch, body)
             try:
                 if launch.get("scenario_id"):
-                    await self.api.scenario_update(launch["scenario_id"], body)
+                    await self.mutate_scenario("scenario_update", launch["scenario_id"], body)
                     return launch["scenario_id"]
-                result = await self.api.scenario_create(body)
+                result = await self.mutate_scenario("scenario_create", body)
                 ident = (result.get("scenario_id") or result.get("id") or result.get("scenario", {}).get("id")) if isinstance(result, dict) else result
                 if ident:
                     return ident
                 await self.read_cloud()
-                matches = [x for x in self.cloud if scenario_code(x) == launch["code"] and in_home(x, launch["household_id"])]
+                matches = [x for x in self.cloud if owns_code(x, launch) and in_home(x, launch["household_id"])]
                 if len(matches) == 1:
                     return matches[0]["id"]
                 raise ValueError("Яндекс не вернул id сценария; обновите список перед повтором")
@@ -607,8 +687,8 @@ class VoiceManager:
                 creating = not launch.get("scenario_id")
                 # POST мог пройти, даже когда ответ потерялся. Повтору предшествует чтение.
                 await self.read_cloud()
-                matches = [x for x in self.cloud if scenario_code(x) == launch["code"] and in_home(x, launch["household_id"])]
-                if creating and len(matches) == 1:
+                matches = [x for x in self.cloud if owns_code(x, launch) and in_home(x, launch["household_id"])]
+                if len(matches) == 1 and (creating or (matches[0].get("id") == launch.get("scenario_id") and payload_matches(matches[0], launch))):
                     return matches[0]["id"]
                 if len(matches) > 1:
                     raise ValueError("Несколько сценариев имеют один маркер") from err
@@ -650,10 +730,6 @@ class VoiceManager:
         for phrase in norms:
             if any(n in phrase or phrase in n for n in device_names):
                 warnings.append("Фраза пересекается с именем устройства")
-            if re.search(r"\b(алиса|яндекс)\b", phrase):
-                warnings.append("Алиса или Яндекс внутри фразы могут мешать распознаванию")
-            if re.match(r"^(включи|выключи|расскажи|почитай|поставь|продолжи|сделай|пауза|стоп|громче|тише)\b", phrase):
-                warnings.append("Алиса может выполнить свою команду вместо вашей. Лучше начать иначе, например «запусти …»")
         return errors, list(dict.fromkeys(warnings))
 
     async def save(self, msg):
@@ -665,21 +741,26 @@ class VoiceManager:
                 original = self._launch(msg) if msg.get("launch_id") else None
                 launch = deepcopy(original) if original else {"id": ident, "source": "manual", "key": manual_key(msg.get("media")), "state": "waiting", "scenario_id": None, "pinned": True, "missing_since": None}
                 if not original and ident in self.launches:
+                    if self.launches[ident].get("source") != "manual" or self.launches[ident].get("key") != manual_key(msg.get("media")):
+                        raise ValueError("Маркер совпал с другим объектом Music Assistant")
                     launch = deepcopy(self.launches[ident])
                     if launch.get("household_id") != home:
                         raise ValueError("Запуск принадлежит другому дому")
-                title = clean(msg.get("title", launch.get("title", ""))).strip()
+                title = library.clean_title(msg.get("title", launch.get("title", "")), audiobook=launch.get("media", msg.get("media", {})).get("media_type") == "audiobook")
                 media = msg.get("media", launch.get("media"))
                 if not title or not isinstance(media, dict) or not media.get("media_type") or not (media.get("uri") or media.get("uris")):
                     raise ValueError("Укажите название и объект Music Assistant")
                 reply = msg.get("reply", launch.get("reply", "phrase"))
                 if reply not in ("phrase", "silent"):
                     raise ValueError("Неизвестный ответ Алисы")
+                saved_code = launch.get("code")
                 launch.pop("media_missing", None)
                 launch.update(title_override=bool(original and title != original.get("source_title", original.get("title"))), title=title, media=deepcopy(media), household_id=home, reply=reply, code=launch.get("code") or make_code(launch["key"], self.account, home))
-                own = [s for s in self.cloud if scenario_code(s) == launch["code"] and in_home(s, home)]
+                own = [s for s in self.cloud if self.owns_scenario(s, launch)]
                 if len(own) > 1:
                     raise ValueError("Несколько сценариев имеют один маркер; разберите сироты")
+                if own and not saved_code:
+                    raise ValueError("Маркер занят другим сценарием")
                 if own:
                     launch["scenario_id"] = own[0]["id"]
                 phrases = msg.get("phrases", launch.get("phrases", []))
@@ -689,10 +770,24 @@ class VoiceManager:
                 if warnings and not msg.get("confirm_warnings"):
                     return {"needs_confirmation": True, "warnings": warnings}
                 launch["phrases"] = [clean(p).strip() for p in phrases]
-                existing = [s for s in self.cloud if scenario_code(s) == launch["code"] and in_home(s, home)]
+                existing = [s for s in self.cloud if self.owns_scenario(s, launch)]
                 if len(existing) > 1:
                     raise ValueError("Несколько сценариев имеют один маркер; разберите сироты")
-                launch["scenario_id"] = existing[0]["id"] if existing else None
+                if existing:
+                    launch["scenario_id"] = existing[0]["id"]
+                elif any(s.get("id") == launch.get("scenario_id") for s in self.cloud):
+                    raise ValueError("Сценарий не принадлежит этому запуску")
+                else:
+                    # Только полный успешный список доказывает отсутствие id.
+                    launch["scenario_id"] = None
+                new_code = make_code(launch["key"], self.account, home)
+                if any(other["id"] != ident and other.get("household_id") == home and new_code in launch_codes(other) for other in self.launches.values()):
+                    raise ValueError("Маркер совпал с другим запуском")
+                if any(scenario_code(s) == new_code and in_home(s, home) and s.get("id") != launch.get("scenario_id") for s in self.cloud):
+                    raise ValueError("Маркер занят другим сценарием")
+                if launch["code"] != new_code:
+                    launch["previous_code"] = launch["code"]
+                    launch["code"] = new_code
                 launch["cloud_dirty"] = bool(launch.get("scenario_id"))
                 launch["state"] = "pending"
                 self.launches[ident] = launch
@@ -701,6 +796,7 @@ class VoiceManager:
                     body = scenario_body(launch)
                     launch["scenario_id"] = await self.write_scenario(launch, body)
                     launch.update(state="active", last_error=None, cloud_dirty=False)
+                    launch.pop("previous_code", None)
                     await self.store.save()
                 except Exception as err:
                     launch["last_error"] = {"message": str(err), "code": getattr(err, "code", None), "temporary": getattr(err, "temporary", False)}
@@ -714,10 +810,10 @@ class VoiceManager:
         ident = launch.get("scenario_id")
         if ident:
             found = next((s for s in self.cloud if s.get("id") == ident), None)
-            if found and (scenario_code(found) != launch.get("code") or not in_home(found, launch.get("household_id"))):
+            if found and not self.owns_scenario(found, launch):
                 raise ValueError("Сценарий не принадлежит этому запуску")
             if found:
-                await self.api.scenario_delete(ident)
+                await self.mutate_scenario("scenario_delete", ident)
                 self.cloud.remove(found)
             launch.update(scenario_id=None, state="waiting", last_error=None)
             await self.store.save()
@@ -729,7 +825,7 @@ class VoiceManager:
             code = scenario_code(scenario)
             if not in_home(scenario, home) or not code or scenario.get("id") in known:
                 continue
-            matches = [l for l in self.launches.values() if l.get("household_id") == home and l.get("code") == code and not l.get("scenario_id")]
+            matches = [l for l in self.launches.values() if l.get("household_id") == home and code in launch_codes(l) and not l.get("scenario_id")]
             can_bind = len(matches) == 1
             result.append({**scenario, "code": code, "can_bind": can_bind, "reason": None if can_bind else "Нет однозначной сохранённой карточки с объектом MA; сценарий не хранит, что играть", "bind_reason": None if can_bind else "Нет однозначной сохранённой карточки с объектом MA; сценарий не хранит, что играть"})
         return result
@@ -814,7 +910,7 @@ class VoiceManager:
                         continue
                     clone = deepcopy(template)
                     ident = uuid.uuid4().hex
-                    clone.update(id=ident, household_id=home, scenario_id=None, code=None, state="missing" if template.get("state") == "missing" else "waiting", phrases=[], last_error=None, cloud_dirty=False)
+                    clone.update(id=ident, household_id=home, scenario_id=None, code=None, previous_code=None, state="missing" if template.get("state") == "missing" else "waiting", phrases=[], last_error=None, cloud_dirty=False)
                     self.launches[ident] = clone
                     changed = True
                 if changed:
@@ -834,7 +930,7 @@ class VoiceManager:
                         item["cloud_error"] = "Изменён в приложении"
                     launches.append(item)
                 return {"launches": launches, "library": deepcopy(self.library_state), "speakers": speakers,
-                        "players": [{"entity_id": e.entity_id, "name": e.original_name or e.entity_id} for e in self.registry() if e.platform == "music_assistant" and not e.disabled_by],
+                        "players": [{"entity_id": e.entity_id, "name": e.original_name or e.entity_id} for e in self.registry() if e.entity_id.startswith("media_player.") and e.platform == "music_assistant" and not e.disabled_by],
                         "health": self.health(), "orphans": self.orphans(home),
                         "scenarios": [{"id": s.get("id"), "name": s.get("name", ""),
                                        "phrases": [t.get("value") for t in s.get("triggers", []) if t.get("type") == "scenario.trigger.voice"],
@@ -845,7 +941,7 @@ class VoiceManager:
                 if speaker is None:
                     raise ValueError("Колонка не найдена в этом доме")
                 target = msg.get("ma_entity_id")
-                if target and not any(e.entity_id == target and e.platform == "music_assistant" and not e.disabled_by for e in self.registry()):
+                if target and not any(e.entity_id == target and e.entity_id.startswith("media_player.") and e.platform == "music_assistant" and not e.disabled_by for e in self.registry()):
                     raise ValueError("Игрок MA не найден")
                 if target:
                     self.data["speaker_map"][speaker["entity_id"]] = target
@@ -864,11 +960,11 @@ class VoiceManager:
                 skipped = []
                 for scenario in orphans:
                     if operation == "delete":
-                        await self.api.scenario_delete(scenario["id"])
+                        await self.mutate_scenario("scenario_delete", scenario["id"])
                         self.cloud.remove(next(s for s in self.cloud if s["id"] == scenario["id"]))
                         await self.store.save()
                     elif operation == "bind":
-                        matches = [l for l in self.launches.values() if l.get("household_id") == home and l.get("code") == scenario["code"]]
+                        matches = [l for l in self.launches.values() if l.get("household_id") == home and scenario["code"] in launch_codes(l)]
                         if len(matches) != 1 or matches[0].get("scenario_id"):
                             reason = scenario.get("bind_reason") or "Нет однозначной сохранённой карточки"
                             if msg.get("scenario_id"):

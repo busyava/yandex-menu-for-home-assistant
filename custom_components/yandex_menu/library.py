@@ -41,6 +41,19 @@ def _parts(path):
     return parts
 
 
+def clean_title(value, *, audiobook=False):
+    """Убрать технические метки и чтеца из имени коллекции."""
+    title = str(value).replace("---", "—")
+    title = re.sub(r"\[[^]\n]*\]", " ", title)
+    title = re.sub(r"\b\d{4}-\d{2}-\d{2}\b|\(\d{4}\)", " ", title)
+    title = re.sub(r"\b(?:\d{2,4}\s*(?:kbps|кбит(?:/с)?|kb/s)|FLAC|MP3)\b", " ", title, flags=re.I)
+    title = re.sub(r"\s*\([^()]*\)\s*$", "", title)
+    if audiobook and " — " in title:
+        title = title.split(" — ", 1)[1]
+    title = " ".join(re.sub(r"[\W_]", " ", title).split())
+    return " ".join(title.split()[:6])[:60].rstrip()
+
+
 def _sort_album(row):
     name = row["path"][1] if len(row["path"]) > 1 else row["path"][0]
     date = re.search(r"\d{4}-\d{2}-\d{2}", name)
@@ -57,6 +70,7 @@ async def read_library(mass) -> dict:
     try:
         providers = _providers(mass)
         ids = {_get(p, "instance_id") for p in providers}
+        source_names = {_get(p, "instance_id"): _get(p, "name") or _get(p, "domain") for p in providers}
         result["providers"] = sorted(ids)
         source_health = {_get(p, "instance_id"): bool(_get(p, "available", False))
                          for p in providers}
@@ -121,6 +135,7 @@ async def read_library(mass) -> dict:
                     and len(albums) == len(rows)):
                 media = {"media_type": "folder_artist", "uris": [r["uri"] for r in sorted(albums, key=_sort_album)]}
                 title = top
+                ordered_albums = sorted(albums, key=_sort_album)
             elif len(rows) == 1:
                 media = {"media_type": rows[0]["kind"], "uri": rows[0]["uri"]}
                 title = rows[0]["title"]
@@ -134,7 +149,9 @@ async def read_library(mass) -> dict:
                     "identities": sorted({r["identity"] for r in rows}),
                 })
                 continue
-            launches.append({"source": "library", "key": f"{provider}|{top}", "title": title,
+            launches.append({"source": "library", "key": f"{provider}|{top}", "title": clean_title(title, audiobook=media["media_type"] == "audiobook") or clean_title(top),
+                             "source_name": source_names[provider],
+                             "albums": [{"title": clean_title(r["title"]) or clean_title(r["path"][-1]), "uri": r["uri"]} for r in ordered_albums] if media["media_type"] == "folder_artist" else [],
                              "media": media, "provider_instance": provider,
                              "identities": sorted({r["identity"] for r in rows})})
         result.update(complete=True, launches=launches,

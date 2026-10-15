@@ -251,22 +251,25 @@ Home Assistant.
 
 ## Play by voice
 
-The **Включить голосом** (Play by voice) block follows Scenarios. Its collapsed **Библиотека**
-(Library) group lists top-level folders from Music Assistant file providers. New folders show
+The **Медиатека** (Media library) section sits between rooms and Scenarios. Top-level folders
+from Music Assistant file providers are visible immediately, in the same row style as devices. New folders show
 **Ждёт активации** (Waiting for activation): nothing is written to Yandex automatically.
 Open a card, enter one to **four phrases** — Yandex's limit — and press **Активировать**
-(Activate). For a Beatles folder you could use “включи битлов”. Suggestion chips fill an empty
-phrase field and can be edited. Duplicate phrases block saving; warnings need a second press.
+(Activate). For a Beatles folder you could use “включи битлов”. Add phrases through the
+**Новая фраза** (New phrase) field; suggestion chips fill that field. The first phrase is marked
+as primary. Adding or removing a phrase on an active launch updates its scenario immediately.
+Duplicate phrases block saving; warnings about overlapping device names need a second press.
 
 An album plays in full. An audiobook resumes where it stopped, using MA's saved position,
 shared by the household. An artist folder containing several albums plays those albums in
 subfolder date order, falling back to name order. Alice's pause and sleep timer preserve the
-book position. **Добавить** (Add) creates a manual card: search MA and select a result.
+book position. The last **Добавить запуск** (Add launch) row opens MA search for a manual card.
 
 Choose Alice's “Включаю ‹title›” reply or silence. **Проверить** (Test) uses the selected
 speaker and shows the latest result. A spoken phrase plays on the speaker that heard it.
-Expand **Колонки и облачные обновления** (Speakers and cloud updates) to check mappings
-and select an MA player manually when necessary.
+If speaker mappings or cloud updates need attention, a warning appears above the folders.
+**Исправить** (Fix) opens the **Колонки** (Speakers) side panel, where you can select an MA
+player. The launch card's **Проверить** section also provides access to this panel.
 
 Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
 “Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”
@@ -294,7 +297,7 @@ providers and speakers yourself; allow around 20–30 minutes.
    One book can be a folder of numbered chapters with matching `album`/`artist` tags, or a
    single `.m4b` file.
 5. Scan the provider and check that the album or book appears in MA, then activate its card
-   in **Включить голосом → Библиотека**.
+   in **Медиатека** (Media library).
 
 > Known MA 2.10.x limitation: its native **Yandex Station** provider may play the wrong stream
 > ([fix #5605](https://github.com/music-assistant/server/pull/5605)). Use **Home Assistant
@@ -388,7 +391,8 @@ sees neither the sidebar item nor the data.
 
 ## How to remove it
 
-First press **Отключить все запуски** (Deactivate all launches) in the voice block and confirm
+First open **Колонки** (Speakers) from a launch card or the media library warning,
+press **Отключить все запуски** (Deactivate all launches), and confirm
 scenario removal. Delete any orphan scenarios shown in that block separately. Removing the
 integration does not automatically remove its scenarios from Yandex.
 
