@@ -677,11 +677,28 @@ class VoiceManager:
                     await mass.player_queues.seek(library._get(queue, "queue_id"), position)
                     message = "вперёд на 30 секунд" if action == "forward" else "назад на 30 секунд"
             elif action == "resume":
+                current_index = library._get(queue, "current_index")
+                elapsed = library._get(queue, "elapsed_time", 0) or 0
+                restart_stream = False
                 if state.state == "paused":
                     await self.hass.services.async_call("media_player", "media_play", {"entity_id": ma_entity}, blocking=True)
                     message = "продолжаю"
+                    for _ in range(8):
+                        self._ensure_open()
+                        await asyncio.sleep(0.5)
+                        self._ensure_open()
+                        current_state = self.hass.states.get(ma_entity)
+                        if current_state and current_state.state == "playing":
+                            break
+                    else:
+                        restart_stream = True
                 else:
-                    message = "уже играет"
+                    station_state = self.hass.states.get(speaker["entity_id"])
+                    restart_stream = not station_state or station_state.state != "playing"
+                    message = "продолжаю" if restart_stream else "уже играет"
+                if restart_stream and current_index is not None:
+                    await mass.player_queues.play_index(library._get(queue, "queue_id"), current_index, seek_position=max(1, int(elapsed)))
+                    message = "продолжаю (перезапуск потока)"
             elif action == "restart":
                 # MA 2.10.6: позиция 0 = «не задана» → книга продолжилась бы с запомненного места
                 await mass.player_queues.seek(library._get(queue, "queue_id"), 1)
