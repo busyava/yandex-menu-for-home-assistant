@@ -1543,6 +1543,7 @@ def _voice_command(action: str):
             vol.Optional("cancel", default=False): bool,
             vol.Optional("cached", default=False): bool,
             vol.Optional("pinned"): bool,
+            vol.Optional("source"): vol.In(("control",)),
         }
     )
     @websocket_api.async_response
