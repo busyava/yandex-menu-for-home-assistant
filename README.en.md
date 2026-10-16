@@ -263,13 +263,20 @@ Duplicate phrases block saving; warnings about overlapping device names need a s
 An album plays in full. An audiobook resumes where it stopped, using MA's saved position,
 shared by the household. An artist folder containing several albums plays those albums in
 subfolder date order, falling back to name order. Alice's pause and sleep timer preserve the
-book position. The last **Добавить запуск** (Add launch) row opens MA search for a manual card.
+book position. The **Добавить запуск** (Add launch) row opens MA search for a manual card.
 
 Choose Alice's “Включаю ‹title›” reply or silence. **Проверить** (Test) uses the selected
 speaker and shows the latest result. A spoken phrase plays on the speaker that heard it.
 If speaker mappings or cloud updates need attention, a warning appears above the folders.
 **Исправить** (Fix) opens the **Колонки** (Speakers) side panel, where you can select an MA
 player. The launch card's **Проверить** section also provides access to this panel.
+
+The **Управление голосом** (Voice controls) subsection enables “дальше” (next), “назад”
+(previous), “продолжи” (resume) and “сначала” (restart). Open a row, adjust the preset
+phrases if needed, and press **Активировать** (Activate). Commands act on the speaker
+that heard them, without an Alice reply: next and previous switch tracks or audiobook
+chapters when available; resume continues after a pause; restart begins the book or current
+track again. Pause and stop are built into Alice and need no separate activation.
 
 Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
 “Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”

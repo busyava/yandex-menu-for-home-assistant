@@ -7,6 +7,7 @@ from datetime import timedelta
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -25,6 +26,12 @@ from .quasar_api import QuasarError
 
 _LOGGER = logging.getLogger(__name__)
 MARKER = re.compile(r";;([,.:]+)$")
+CONTROLS = {
+    "next": {"title": "Следующий трек", "phrases": ["дальше", "следующий трек", "следующая песня", "следующая глава"]},
+    "previous": {"title": "Предыдущий трек", "phrases": ["назад", "предыдущий трек", "предыдущая песня", "предыдущая глава"]},
+    "resume": {"title": "Продолжить", "phrases": ["продолжи", "продолжай", "играй дальше"]},
+    "restart": {"title": "Сначала", "phrases": ["сначала", "с начала", "включи сначала"]},
+}
 
 
 def clean(value):
@@ -43,9 +50,11 @@ def make_code(key, account, household):
 def scenario_body(launch):
     title = library.clean_title(launch["title"], audiobook=launch.get("media", {}).get("media_type") == "audiobook")
     suffix = ";;" + launch["code"]
-    silent = launch.get("reply") == "silent"
+    control = launch.get("source") == "control"
+    silent = control or launch.get("reply") == "silent"
     value = ("ничего не делай" if silent else "Включаю " + title)[:100-len(suffix)] + suffix
-    return {"name": f"▶ {title} · Яндекс меню", "icon": "home",
+    icon = "⏯" if control else "▶"
+    return {"name": f"{icon} {title} · Яндекс меню", "icon": "home",
             "household_id": launch["household_id"],
             "triggers": [{"type": "scenario.trigger.voice", "value": clean(p)} for p in launch["phrases"]],
             "steps": [{"type": "scenarios.steps.actions.v2", "parameters": {"items": [{
@@ -472,6 +481,8 @@ class VoiceManager:
 
     async def play(self, launch, speaker):
         self._ensure_open()
+        if launch.get("source") == "control":
+            return await self.play_control(launch, speaker)
         error = None
         if not self.ma_available():
             error = "Music Assistant недоступен"
@@ -504,6 +515,75 @@ class VoiceManager:
                 _LOGGER.debug("Не удалось произнести ошибку", exc_info=True)
         return result
 
+    async def play_control(self, launch, speaker):
+        """Управлять очередью услышавшей колонки, не отправляя фразы Алисе."""
+        success = True
+        try:
+            action = launch["media"]["action"]
+            if action not in CONTROLS:
+                raise ValueError("Неизвестная команда управления")
+            ma_entity = speaker.get("ma_entity_id")
+            state = self.hass.states.get(ma_entity) if ma_entity else None
+            queue = None
+            mass = library.get_mass(self.hass)
+            if state and state.state in ("playing", "paused"):
+                if mass is None:
+                    raise ValueError("Клиент очереди Music Assistant недоступен")
+                player = next((e for e in self.registry() if e.entity_id == ma_entity and e.platform == "music_assistant"), None)
+                if player is None:
+                    raise ValueError("Игрок Music Assistant не найден")
+                queue = await mass.player_queues.get_active_queue(player.unique_id)
+                self._ensure_open()
+            item = library._get(queue, "current_item")
+            if not item:
+                if action == "restart":
+                    message = "MA не играет — нечего включать сначала"
+                else:
+                    service = {"next": "media_next_track", "previous": "media_previous_track", "resume": "media_play"}[action]
+                    await self.hass.services.async_call("media_player", service, {"entity_id": speaker["entity_id"]}, blocking=True)
+                    message = "MA не играет — команда отдана станции"
+            elif action == "resume":
+                if state.state == "paused":
+                    await self.hass.services.async_call("media_player", "media_play", {"entity_id": ma_entity}, blocking=True)
+                    message = "продолжаю"
+                else:
+                    message = "уже играет"
+            elif action == "restart":
+                # MA 2.10.6: позиция 0 = «не задана» → книга продолжилась бы с запомненного места
+                await mass.player_queues.seek(library._get(queue, "queue_id"), 1)
+                message = "с начала"
+            else:
+                media = library._get(item, "media_item")
+                kind = library._get(media, "media_type", library._get(item, "media_type"))
+                if getattr(kind, "value", kind) == "audiobook":
+                    metadata = library._get(media, "metadata")
+                    chapters = sorted(library._get(metadata, "chapters") or [], key=lambda c: library._get(c, "start"))
+                    elapsed = library._get(queue, "elapsed_time", 0)
+                    current = next((i for i in range(len(chapters)-1, -1, -1)
+                                    if library._get(chapters[i], "start") <= elapsed
+                                    and (library._get(chapters[i], "end") is None or elapsed < library._get(chapters[i], "end"))), None)
+                    if current is None:
+                        message = "Главы книги недоступны"
+                    else:
+                        target = current + 1 if action == "next" else current if elapsed-library._get(chapters[current], "start") > 5 else current-1
+                        if not 0 <= target < len(chapters):
+                            message = "Последняя глава" if action == "next" else "Первая глава"
+                        else:
+                            await mass.player_queues.seek(library._get(queue, "queue_id"), max(1, math.ceil(library._get(chapters[target], "start"))))
+                            message = f"глава {target+1}"
+                else:
+                    service = "media_next_track" if action == "next" else "media_previous_track"
+                    await self.hass.services.async_call("media_player", service, {"entity_id": ma_entity}, blocking=True)
+                    message = "следующий трек" if action == "next" else "предыдущий трек"
+        except Exception:
+            self._ensure_open()
+            success = False
+            message = "Не удалось выполнить команду управления"
+            _LOGGER.exception("Не удалось выполнить управление %s на %s", launch["id"], speaker["entity_id"])
+        result = {"time": time.time(), "entity_id": speaker["entity_id"], "speaker": speaker["name"], "success": success, "message": message}
+        self.results[launch["id"]] = result
+        return result
+
     async def refresh(self, scan=False, user_id=None):
         if self.closed:
             return self.library_state
@@ -526,7 +606,8 @@ class VoiceManager:
                         self.library_state["scan_error"] = self._scan_error("Music Assistant недоступен")
                     self.library_state.update(complete=False, error="Доступны только ручные карточки: клиент библиотеки MA недоступен" if self.ma_available() else "Music Assistant недоступен")
                     for launch in self.launches.values():
-                        launch.update(missing_since=None, missing_confirmed=False)
+                        if launch.get("source") != "control":
+                            launch.update(missing_since=None, missing_confirmed=False)
                     await self.store.save()
                     return self.library_state
                 if scan:
@@ -547,7 +628,8 @@ class VoiceManager:
                 self.library_state.update(complete=snapshot["complete"], error=snapshot.get("error"), warnings=snapshot.get("warnings", []))
                 if not snapshot["complete"]:
                     for launch in self.launches.values():
-                        launch.update(missing_since=None, missing_confirmed=False)
+                        if launch.get("source") != "control":
+                            launch.update(missing_since=None, missing_confirmed=False)
                     await self.store.save()
                     return self.library_state
                 async with self.cloud_lock:
@@ -759,24 +841,48 @@ class VoiceManager:
         return errors, list(dict.fromkeys(warnings))
 
     async def save(self, msg):
-        ident = msg.get("launch_id") or "manual:" + make_code(manual_key(msg.get("media")), self.account, msg.get("household_id"))
+        control = msg.get("source") == "control"
+        media = msg.get("media")
+        if control and not msg.get("launch_id") and (not isinstance(media, dict) or media.get("media_type") != "control" or media.get("action") not in CONTROLS):
+            raise ValueError("Выберите команду управления")
+        key = "control:" + media["action"] if control and isinstance(media, dict) and media.get("action") in CONTROLS else manual_key(media)
+        ident = msg.get("launch_id") or ("control:" if control else "manual:") + make_code(key, self.account, msg.get("household_id"))
         async with self.cloud_lock:
             async with self.locks.setdefault(ident, asyncio.Lock()):
                 await self.read_cloud()
                 home = self._home(msg)
                 original = self._launch(msg) if msg.get("launch_id") else None
-                launch = deepcopy(original) if original else {"id": ident, "source": "manual", "key": manual_key(msg.get("media")), "state": "waiting", "scenario_id": None, "pinned": True, "missing_since": None}
+                if original:
+                    if control and original.get("source") != "control":
+                        raise ValueError("Нельзя заменить объект командой управления")
+                    control = original.get("source") == "control"
+                if control:
+                    media = msg.get("media", original.get("media") if original else None)
+                    if not isinstance(media, dict) or media.get("media_type") != "control" or media.get("action") not in CONTROLS:
+                        raise ValueError("Выберите команду управления")
+                    key = "control:" + media["action"]
+                    if original and original.get("key") != key:
+                        raise ValueError("Нельзя изменить вид команды управления")
+                    existing = next((l for l in self.launches.values() if l.get("source") == "control" and l.get("key") == key and l.get("household_id") == home), None)
+                    if existing and existing["id"] != ident:
+                        raise ValueError("Команда управления уже существует в этом доме")
+                launch = deepcopy(original) if original else {"id": ident, "source": "control" if control else "manual", "key": key, "state": "waiting", "scenario_id": None, "pinned": True, "missing_since": None}
                 if not original and ident in self.launches:
-                    if self.launches[ident].get("source") != "manual" or self.launches[ident].get("key") != manual_key(msg.get("media")):
+                    if self.launches[ident].get("source") != ("control" if control else "manual") or self.launches[ident].get("key") != key:
                         raise ValueError("Маркер совпал с другим объектом Music Assistant")
                     launch = deepcopy(self.launches[ident])
                     if launch.get("household_id") != home:
                         raise ValueError("Запуск принадлежит другому дому")
-                title = library.clean_title(msg.get("title", launch.get("title", "")), audiobook=launch.get("media", msg.get("media", {})).get("media_type") == "audiobook")
-                media = msg.get("media", launch.get("media"))
-                if not title or not isinstance(media, dict) or not media.get("media_type") or not (media.get("uri") or media.get("uris")):
-                    raise ValueError("Укажите название и объект Music Assistant")
-                reply = msg.get("reply", launch.get("reply", "phrase"))
+                if control:
+                    definition = CONTROLS[media["action"]]
+                    title = definition["title"]
+                    media = {"media_type": "control", "action": media["action"]}
+                else:
+                    title = library.clean_title(msg.get("title", launch.get("title", "")), audiobook=launch.get("media", msg.get("media", {})).get("media_type") == "audiobook")
+                    media = msg.get("media", launch.get("media"))
+                    if not title or not isinstance(media, dict) or media.get("media_type") == "control" or not media.get("media_type") or not (media.get("uri") or media.get("uris")):
+                        raise ValueError("Укажите название и объект Music Assistant")
+                reply = "silent" if control else msg.get("reply", launch.get("reply", "phrase"))
                 if reply not in ("phrase", "silent"):
                     raise ValueError("Неизвестный ответ Алисы")
                 saved_code = launch.get("code")
@@ -789,7 +895,7 @@ class VoiceManager:
                     raise ValueError("Маркер занят другим сценарием")
                 if own:
                     launch["scenario_id"] = own[0]["id"]
-                phrases = msg.get("phrases", launch.get("phrases", []))
+                phrases = msg.get("phrases", launch.get("phrases", definition["phrases"] if control else []))
                 errors, warnings = self.validate(launch, phrases)
                 if errors:
                     return {"errors": errors, "warnings": warnings}
@@ -1019,7 +1125,7 @@ class VoiceManager:
                 sources = snapshot.get("sources", {})
                 present = {x["key"] for x in snapshot.get("launches", [])}
                 now = time.time()
-                missing = [l for l in self.launches.values() if l.get("household_id") == home and l.get("state") == "missing" and l.get("scenario_id")]
+                missing = [l for l in self.launches.values() if l.get("source") != "control" and l.get("household_id") == home and l.get("state") == "missing" and l.get("scenario_id")]
                 # MA item_id уникален внутри media table, а ключ папки может
                 # измениться. Проверяем весь набор до первого облачного DELETE.
                 def media_table(item):
@@ -1048,7 +1154,9 @@ class VoiceManager:
                     return {"result": await self.play(launch, speaker)}
                 if action not in ("deactivate", "delete", "exclude"):
                     raise ValueError("Неизвестная команда")
-                if action == "delete" and launch["source"] != "manual":
+                if action == "exclude" and launch["source"] == "control":
+                    raise ValueError("Для команды управления выберите «Выключить»")
+                if action == "delete" and launch["source"] not in ("manual", "control"):
                     raise ValueError("Для библиотечной карточки выберите «Не показывать»")
                 await self.remove_scenario(launch)
                 if action in ("delete", "exclude"):
