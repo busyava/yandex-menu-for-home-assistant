@@ -2,10 +2,14 @@
 
 [Русская версия](README.md)
 
-A **Яндекс меню** ("Yandex menu") item in the Home Assistant sidebar that gathers every device in
-your Yandex home, together with the things you normally have to open the Yandex app ("Дом с
-Алисой") for: what a device is called by voice, which room it is in, and which lamp comes on when
-you say "Alice, turn on the light".
+A **Яндекс меню** ("Yandex menu") item in the Home Assistant sidebar. It does two things:
+
+1. **Your Yandex home devices.** Every lamp, switch and other device, room by room, together with
+   the things you normally have to open the Yandex app ("Дом с Алисой") for: what a device is called
+   by voice, which room it is in, and which lamp comes on when you say "Alice, turn on the light".
+2. **Your audio library by voice.** Alice plays your own books and music from Music Assistant
+   by a phrase ("Алиса, включи мюнхгаузена") on the speaker that heard it. Then you control them
+   by voice: next chapter, seek, repeat, "what is playing", "transfer here".
 
 No separate Yandex login is needed — the integration uses the same access that
 [Yandex Station](https://github.com/AlexxIT/YandexStation) already has.
@@ -38,6 +42,17 @@ That familiar "Alice, turn on the light", which lights up the whole room at once
 too — that is what the main and secondary light roles on a lamp are for.
 
 ## Features
+
+### Books and music by voice
+
+- **A phrase for each book or album.** Music Assistant folders appear in the **Медиатека**
+  (Media library) section. Add up to four phrases and press Activate — the panel creates the
+  Yandex scenario itself.
+- **Books resume where they stopped,** on any speaker in the home: start in the kitchen, go on in the living room.
+- **Voice controls.** Next and previous (chapters in a book), resume, restart, seek 30 seconds,
+  shuffle, repeat, "what is playing" and "transfer here". Details in [Play by voice](#play-by-voice).
+
+![The Media library section: artist folders, albums and audiobooks from Music Assistant, active ones with their Alice phrases](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/media.png)
 
 ### Recalling what a device is called
 
@@ -265,6 +280,8 @@ shared by the household. An artist folder containing several albums plays those 
 subfolder date order, falling back to name order. Alice's pause and sleep timer preserve the
 book position. The **Добавить запуск** (Add launch) row opens MA search for a manual card.
 
+![An audiobook card: four launch phrases, the first one primary, then what plays and Alice's reply](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/launch.png)
+
 Choose Alice's “Включаю ‹title›” reply or silence. **Проверить** (Test) uses the selected
 speaker and shows the latest result. A spoken phrase plays on the speaker that heard it.
 If speaker mappings or cloud updates need attention, a warning appears above the folders.
@@ -279,6 +296,8 @@ chapters when available; resume continues after a pause; restart begins the book
 track again. Also available: seek forward/back 30 seconds, shuffle on/off, and repeat all/one/off.
 “What is playing” speaks the artist and track or book and chapter; “transfer here” moves music or a book from another speaker in the same home, preserving its position (Alice tells you if nothing is playing elsewhere). Each command creates a separate Yandex scenario: enable only those you need.
 Pause and stop are built into Alice and need no separate activation.
+
+![The Voice controls subsection: next and previous track, resume, restart and seek, each with its phrases and marked active](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/controls.png)
 
 Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
 “Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”
