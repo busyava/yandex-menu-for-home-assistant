@@ -565,12 +565,16 @@ class VoiceManager:
                     if current is None:
                         message = "Главы книги недоступны"
                     else:
-                        target = current + 1 if action == "next" else current if elapsed-library._get(chapters[current], "start") > 5 else current-1
+                        target = current + 1 if action == "next" else max(0, current - 1)
                         if not 0 <= target < len(chapters):
                             message = "Последняя глава" if action == "next" else "Первая глава"
                         else:
                             await mass.player_queues.seek(library._get(queue, "queue_id"), max(1, math.ceil(library._get(chapters[target], "start"))))
-                            message = f"глава {target+1}"
+                            message = "первая глава" if action == "previous" and current == 0 else f"глава {target+1}"
+                elif action == "previous" and library._get(queue, "current_index") is not None:
+                    current_index = library._get(queue, "current_index")
+                    await mass.player_queues.play_index(library._get(queue, "queue_id"), max(0, current_index - 1))
+                    message = "первый трек" if current_index == 0 else "предыдущий трек"
                 else:
                     service = "media_next_track" if action == "next" else "media_previous_track"
                     await self.hass.services.async_call("media_player", service, {"entity_id": ma_entity}, blocking=True)
