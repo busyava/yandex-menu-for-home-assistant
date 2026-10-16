@@ -654,6 +654,10 @@ class VoiceManager:
                 await self.say_control(speaker, message)
             elif not item and action in ("forward", "back", "shuffle_on", "shuffle_off", "repeat_all", "repeat_one", "repeat_off"):
                 message = await self.station_control(action, speaker)
+            elif not item and action == "resume" and library._get(queue, "current_index") is not None:
+                # После рестарта HA очередь MA помнит номер, но не элемент: resume сам соберёт поток
+                await mass.player_queues.resume(library._get(queue, "queue_id"))
+                message = "продолжаю (перезапуск потока)"
             elif not item:
                 if action == "restart":
                     message = "MA не играет — нечего включать сначала"
