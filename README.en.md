@@ -274,9 +274,11 @@ player. The launch card's **Проверить** section also provides access to
 The **Управление голосом** (Voice controls) subsection enables “дальше” (next), “назад”
 (previous), “продолжи” (resume) and “сначала” (restart). Open a row, adjust the preset
 phrases if needed, and press **Активировать** (Activate). Commands act on the speaker
-that heard them, without an Alice reply: next and previous switch tracks or audiobook
+that heard them: next and previous switch tracks or audiobook
 chapters when available; resume continues after a pause; restart begins the book or current
-track again. Pause and stop are built into Alice and need no separate activation.
+track again. Also available: seek forward/back 30 seconds, shuffle on/off, and repeat all/one/off.
+“What is playing” speaks the artist and track or book and chapter; “transfer here” moves music or a book from another speaker in the same home, preserving its position (Alice tells you if nothing is playing elsewhere). Each command creates a separate Yandex scenario: enable only those you need.
+Pause and stop are built into Alice and need no separate activation.
 
 Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
 “Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”

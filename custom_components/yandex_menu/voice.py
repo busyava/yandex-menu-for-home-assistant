@@ -13,10 +13,16 @@ import time
 import uuid
 
 from homeassistant.core import callback
+from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.config_entries import SIGNAL_CONFIG_ENTRY_CHANGED
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
+
+try:
+    from music_assistant_models.enums import RepeatMode
+except ImportError:
+    RepeatMode = None
 
 from .accounts import account_key, station_entry
 from .const import DATA_CACHE_OWNER, DATA_CONFIGS, DOMAIN
@@ -31,6 +37,15 @@ CONTROLS = {
     "previous": {"title": "Предыдущий трек", "phrases": ["назад", "предыдущий трек", "предыдущая песня", "предыдущая глава"]},
     "resume": {"title": "Продолжить", "phrases": ["продолжи", "продолжай", "играй дальше"]},
     "restart": {"title": "Сначала", "phrases": ["сначала", "с начала", "включи сначала"]},
+    "forward": {"title": "Вперёд на 30 с", "phrases": ["перемотай вперёд", "вперёд на 30 секунд", "промотай вперёд"]},
+    "back": {"title": "Назад на 30 с", "phrases": ["перемотай назад", "назад на 30 секунд", "промотай назад"]},
+    "shuffle_on": {"title": "Перемешать", "phrases": ["перемешай", "включи перемешивание", "в случайном порядке"]},
+    "shuffle_off": {"title": "По порядку", "phrases": ["по порядку", "выключи перемешивание", "не перемешивай"]},
+    "repeat_all": {"title": "Повторять всё", "phrases": ["повторяй", "повторяй всё", "включи повтор"]},
+    "repeat_one": {"title": "Повторять трек", "phrases": ["повторяй трек", "повторяй эту песню"]},
+    "repeat_off": {"title": "Без повтора", "phrases": ["не повторяй", "выключи повтор", "хватит повторять"]},
+    "now_playing": {"title": "Что играет", "phrases": ["что играет", "что сейчас играет", "что это играет", "какая глава"]},
+    "transfer": {"title": "Перенести сюда", "phrases": ["перенеси сюда", "играй здесь", "включи здесь", "перенеси музыку сюда"]},
 }
 
 
@@ -124,6 +139,19 @@ def snapshot_skips(snapshot, launch):
         (warning.get("provider_instance") == launch.get("provider_instance") and
          set(warning.get("identities", [])).intersection(launch.get("identities", [])))
         for warning in snapshot.get("warnings", []))
+
+
+def current_chapter(queue):
+    """Найти главу по позиции во всей книге."""
+    media = library._get(library._get(queue, "current_item"), "media_item")
+    chapters = sorted(library._get(library._get(media, "metadata"), "chapters") or [],
+                      key=lambda chapter: library._get(chapter, "start"))
+    elapsed = library._get(queue, "elapsed_time", 0) or 0
+    current = next((i for i in range(len(chapters) - 1, -1, -1)
+                    if library._get(chapters[i], "start") <= elapsed
+                    and (library._get(chapters[i], "end") is None
+                         or elapsed < library._get(chapters[i], "end"))), None)
+    return chapters, current
 
 
 class VoiceManager:
@@ -515,8 +543,92 @@ class VoiceManager:
                 _LOGGER.debug("Не удалось произнести ошибку", exc_info=True)
         return result
 
+    async def say_control(self, speaker, text):
+        self._ensure_open()
+        await self.hass.services.async_call("media_player", "play_media", {
+            "entity_id": speaker["entity_id"], "media_content_type": "text",
+            "media_content_id": text}, blocking=True)
+
+    def now_playing_text(self, queue, speaker):
+        item = library._get(queue, "current_item")
+        if not item:
+            state = self.hass.states.get(speaker["entity_id"])
+            attrs = state.attributes if state else {}
+            if state and state.state in ("playing", "paused") and attrs.get("media_title"):
+                return ", ".join(str(v) for v in (attrs.get("media_artist"), attrs["media_title"]) if v)
+            return "Сейчас ничего не играет"
+        media = library._get(item, "media_item")
+        title = library._get(media, "name") or library._get(item, "name") or "Без названия"
+        kind = library._get(media, "media_type", library._get(item, "media_type"))
+        if getattr(kind, "value", kind) == "audiobook":
+            chapters, current = current_chapter(queue)
+            if current is not None:
+                title += f", глава {current + 1}"
+                chapter_title = str(library._get(chapters[current], "title") or "").strip()
+                if chapter_title and not re.fullmatch(r"(?:глава\s*)?\d+[.\s]*", chapter_title, re.IGNORECASE):
+                    title += ", " + chapter_title
+            return title
+        artists = [library._get(artist, "name") for artist in library._get(media, "artists", []) or []]
+        return ", ".join([str(name) for name in artists if name] + [title])
+
+    async def station_control(self, action, speaker):
+        state = self.hass.states.get(speaker["entity_id"])
+        attrs = state.attributes if state else {}
+        data = {"entity_id": speaker["entity_id"]}
+        service = None
+        if action in ("forward", "back"):
+            if state and state.state == "playing":
+                service = "media_seek"
+                data["seek_position"] = max(0, (attrs.get("media_position") or 0) + (30 if action == "forward" else -30))
+            nothing = "перематывать"
+        elif action.startswith("shuffle_"):
+            if (attrs.get("supported_features") or 0) & MediaPlayerEntityFeature.SHUFFLE_SET:
+                service = "shuffle_set"
+                data["shuffle"] = action == "shuffle_on"
+            nothing = "перемешивать"
+        else:
+            if (attrs.get("supported_features") or 0) & MediaPlayerEntityFeature.REPEAT_SET:
+                service = "repeat_set"
+                data["repeat"] = action.removeprefix("repeat_")
+            nothing = "повторять"
+        if service:
+            await self.hass.services.async_call("media_player", service, data, blocking=True)
+            return "MA не играет — команда отдана станции"
+        return "MA не играет — нечего " + nothing
+
+    async def transfer_control(self, mass, target_queue, speaker):
+        if mass is None or target_queue is None:
+            raise ValueError("Очередь Music Assistant недоступна")
+        candidates = []
+        target_id = library._get(target_queue, "queue_id")
+        registry = self.registry()
+        for row in self.speaker_rows():
+            if row["entity_id"] == speaker["entity_id"] or row.get("household_id") != speaker.get("household_id") or not row.get("ma_entity_id"):
+                continue
+            player = next((entity for entity in registry if entity.entity_id == row["ma_entity_id"] and entity.platform == "music_assistant"), None)
+            if player is None:
+                continue
+            queue = await mass.player_queues.get_active_queue(player.unique_id)
+            self._ensure_open()
+            if not library._get(queue, "current_item") or library._get(queue, "queue_id") == target_id:
+                continue
+            state = library._get(queue, "state")
+            if state is None:
+                entity_state = self.hass.states.get(row["ma_entity_id"])
+                state = entity_state.state if entity_state else None
+            state = getattr(state, "value", state)
+            if state in ("playing", "paused"):
+                candidates.append((state == "playing", library._get(queue, "elapsed_time_last_updated", 0) or 0, row, queue))
+        if not candidates:
+            message = "на других колонках ничего не играет"
+            await self.say_control(speaker, message)
+            return message
+        _, _, source, queue = max(candidates, key=lambda candidate: candidate[:2])
+        await mass.player_queues.transfer(library._get(queue, "queue_id"), target_id, auto_play=True)
+        return "перенесла с " + source["name"]
+
     async def play_control(self, launch, speaker):
-        """Управлять очередью услышавшей колонки, не отправляя фразы Алисе."""
+        """Выполнить управление на услышавшей колонке."""
         success = True
         try:
             action = launch["media"]["action"]
@@ -526,7 +638,7 @@ class VoiceManager:
             state = self.hass.states.get(ma_entity) if ma_entity else None
             queue = None
             mass = library.get_mass(self.hass)
-            if state and state.state in ("playing", "paused"):
+            if (state and state.state in ("playing", "paused") and not (action == "now_playing" and mass is None)) or action == "transfer":
                 if mass is None:
                     raise ValueError("Клиент очереди Music Assistant недоступен")
                 player = next((e for e in self.registry() if e.entity_id == ma_entity and e.platform == "music_assistant"), None)
@@ -535,13 +647,35 @@ class VoiceManager:
                 queue = await mass.player_queues.get_active_queue(player.unique_id)
                 self._ensure_open()
             item = library._get(queue, "current_item")
-            if not item:
+            if action == "transfer":
+                message = await self.transfer_control(mass, queue, speaker)
+            elif action == "now_playing":
+                message = self.now_playing_text(queue, speaker)[:200]
+                await self.say_control(speaker, message)
+            elif not item and action in ("forward", "back", "shuffle_on", "shuffle_off", "repeat_all", "repeat_one", "repeat_off"):
+                message = await self.station_control(action, speaker)
+            elif not item:
                 if action == "restart":
                     message = "MA не играет — нечего включать сначала"
                 else:
                     service = {"next": "media_next_track", "previous": "media_previous_track", "resume": "media_play"}[action]
                     await self.hass.services.async_call("media_player", service, {"entity_id": speaker["entity_id"]}, blocking=True)
                     message = "MA не играет — команда отдана станции"
+            elif action in ("shuffle_on", "shuffle_off"):
+                await mass.player_queues.shuffle(library._get(queue, "queue_id"), action == "shuffle_on")
+                message = "перемешиваю" if action == "shuffle_on" else "по порядку"
+            elif action.startswith("repeat_"):
+                mode = action.removeprefix("repeat_")
+                await mass.player_queues.repeat(library._get(queue, "queue_id"), RepeatMode(mode) if RepeatMode is not None else mode)
+                message = {"all": "повторяю всё", "one": "повторяю трек", "off": "повтор выключен"}[mode]
+            elif action in ("forward", "back"):
+                position = max(1, int(library._get(queue, "elapsed_time", 0) or 0) + (30 if action == "forward" else -30))
+                duration = library._get(item, "duration") or library._get(library._get(item, "media_item"), "duration")
+                if action == "forward" and duration and position >= duration - 2:
+                    message = "конец трека"
+                else:
+                    await mass.player_queues.seek(library._get(queue, "queue_id"), position)
+                    message = "вперёд на 30 секунд" if action == "forward" else "назад на 30 секунд"
             elif action == "resume":
                 if state.state == "paused":
                     await self.hass.services.async_call("media_player", "media_play", {"entity_id": ma_entity}, blocking=True)
@@ -556,12 +690,7 @@ class VoiceManager:
                 media = library._get(item, "media_item")
                 kind = library._get(media, "media_type", library._get(item, "media_type"))
                 if getattr(kind, "value", kind) == "audiobook":
-                    metadata = library._get(media, "metadata")
-                    chapters = sorted(library._get(metadata, "chapters") or [], key=lambda c: library._get(c, "start"))
-                    elapsed = library._get(queue, "elapsed_time", 0)
-                    current = next((i for i in range(len(chapters)-1, -1, -1)
-                                    if library._get(chapters[i], "start") <= elapsed
-                                    and (library._get(chapters[i], "end") is None or elapsed < library._get(chapters[i], "end"))), None)
+                    chapters, current = current_chapter(queue)
                     if current is None:
                         message = "Главы книги недоступны"
                     else:

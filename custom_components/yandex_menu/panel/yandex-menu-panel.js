@@ -9,6 +9,15 @@ const VOICE_CONTROLS = {
   previous: { title: "Предыдущий трек", phrases: ["назад", "предыдущий трек", "предыдущая песня", "предыдущая глава"], hint: "Предыдущий трек. В книге — предыдущая глава." },
   resume: { title: "Продолжить", phrases: ["продолжи", "продолжай", "играй дальше"], hint: "Продолжить воспроизведение после паузы." },
   restart: { title: "Сначала", phrases: ["сначала", "с начала", "включи сначала"], hint: "Книга или текущий трек с самого начала." },
+  forward: { title: "Вперёд на 30 с", phrases: ["перемотай вперёд", "вперёд на 30 секунд", "промотай вперёд"], hint: "Перемотка на 30 секунд вперёд — в книге и в треке." },
+  back: { title: "Назад на 30 с", phrases: ["перемотай назад", "назад на 30 секунд", "промотай назад"], hint: "Перемотка на 30 секунд назад — в книге и в треке." },
+  shuffle_on: { title: "Перемешать", phrases: ["перемешай", "включи перемешивание", "в случайном порядке"], hint: "Случайный порядок треков." },
+  shuffle_off: { title: "По порядку", phrases: ["по порядку", "выключи перемешивание", "не перемешивай"], hint: "Воспроизведение треков по порядку." },
+  repeat_all: { title: "Повторять всё", phrases: ["повторяй", "повторяй всё", "включи повтор"], hint: "Повтор очереди по кругу." },
+  repeat_one: { title: "Повторять трек", phrases: ["повторяй трек", "повторяй эту песню"], hint: "Повтор текущего трека." },
+  repeat_off: { title: "Без повтора", phrases: ["не повторяй", "выключи повтор", "хватит повторять"], hint: "Воспроизведение без повтора." },
+  now_playing: { title: "Что играет", phrases: ["что играет", "что сейчас играет", "что это играет", "какая глава"], hint: "Алиса назовёт трек или книгу и главу." },
+  transfer: { title: "Перенести сюда", phrases: ["перенеси сюда", "играй здесь", "включи здесь", "перенеси музыку сюда"], hint: "Забрать музыку или книгу с другой колонки на эту — с того же места." },
 };
 
 /* Состояния сущностей HA, при которых значок устройства светится. */
@@ -2567,7 +2576,17 @@ class YandexMenuPanel extends HTMLElement {
     html += (state.launches || []).filter((item) => item.source !== "control" && this._voiceMatches(item, words)).map((item) => this._mediaRowHtml(item)).join("");
     html += `<button class="row" data-voice-action="add"><span class="avatar">＋</span><span class="title">Добавить запуск</span></button>`;
     const controls = this._voiceControls().filter((item) => this._voiceMatches(item, words));
-    if (controls.length) html += `<div class="lead"><div class="section-head"><h4>Управление голосом</h4></div><p class="hint">Фразы работают на любой колонке: управляют тем, что включил плагин. Пауза и стоп — встроенные у Алисы.</p></div>${controls.map((item) => this._mediaRowHtml(item)).join("")}`;
+    if (controls.length) {
+      html += `<div class="lead"><div class="section-head"><h4>Управление голосом</h4></div><p class="hint">Фразы работают на любой колонке: управляют тем, что включил плагин. Пауза и стоп — встроенные у Алисы. Каждая команда — отдельный сценарий в Яндексе: включайте только нужные.</p></div>`;
+      for (const [title, actions] of [
+        ["Переходы", ["next", "previous", "resume", "restart", "forward", "back"]],
+        ["Режимы", ["shuffle_on", "shuffle_off", "repeat_all", "repeat_one", "repeat_off"]],
+        ["Прочее", ["now_playing", "transfer"]],
+      ]) {
+        const rows = controls.filter((item) => actions.includes(item.media.action));
+        if (rows.length) html += `<div class="lead"><div class="section-head"><h4>${title}</h4></div></div>${rows.map((item) => this._mediaRowHtml(item)).join("")}`;
+      }
+    }
     return html + `</div></section>`;
   }
 
