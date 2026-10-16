@@ -66,7 +66,7 @@ A **Яндекс меню** ("Yandex menu") item in the Home Assistant sidebar. 
 |---|---|
 | Home Assistant 2024.8 or newer | Uses the current way of registering a panel |
 | [Yandex Station](https://github.com/AlexxIT/YandexStation) (AlexxIT), **3.22.3 or newer** | **Required.** This is where access to the Yandex home comes from: it keeps cookies and tokens fresh by itself |
-| Music Assistant server and Home Assistant integration | Required only for voice media launches; the rest of the panel works without it |
+| [Music Assistant](https://music-assistant.io/installation/) (server) + [Music Assistant integration](https://www.home-assistant.io/integrations/music_assistant/) in HA | Only for the 🎧 Media library; the rest of the panel works without it. Setup — [below](#your-own-files-on-a-speaker) |
 | [Yandex Smart Home](https://github.com/dext0r/yandex_smart_home) (dext0r) | Needed to expose Home Assistant entities to Alice. Without it the panel still shows and edits your devices, but there is nothing to add |
 
 Yandex changed its CSRF token address in October 2026; writing changes requires Yandex Station 3.22.3 or newer.
@@ -257,22 +257,21 @@ Each command is a separate Yandex scenario: open its row → **Активиро�
 
 ## Your own files on a speaker
 
-The panel connects Alice phrases to your library. Set up the MA server, integration, file
-providers and speakers yourself; allow around 20–30 minutes.
+A one-time setup, about 20–30 minutes.
 
-1. Install the **Music Assistant** server (HAOS app or Docker), then add its integration to HA.
-2. In MA add **Home Assistant MediaPlayers**, select your Yandex Station entities and use
-   the **MP3** codec. Expose the MA players as entities in Home Assistant. The panel's status
-   section shows the mappings and allows manual selection.
-3. Put files in HA's `/media`, or connect a NAS in **Settings → System → Storage → Add network
-   storage**, choosing **Media** as the usage type.
-4. Add a **Filesystem** provider in MA pointing at that folder. **Keep books in a separate
-   folder and a separate MA provider with the Audiobooks content type.** In a music provider,
-   chapters become ordinary tracks and the book will not resume from its saved position.
-   One book can be a folder of numbered chapters with matching `album`/`artist` tags, or a
-   single `.m4b` file.
-5. Scan the provider and check that the album or book appears in MA, then activate its card
-   in **Медиатека** (Media library).
+| Step | What to do | Where |
+|---|---|---|
+| 1 | Install the **Music Assistant** server — HAOS app or Docker | [MA install](https://music-assistant.io/installation/) |
+| 2 | Add the **Music Assistant** integration to Home Assistant | [integration](https://www.home-assistant.io/integrations/music_assistant/) |
+| 3 | In MA add the **Home Assistant MediaPlayers** player provider, select your Yandex Stations, codec **MP3** | [HA provider](https://music-assistant.io/player-support/ha/) |
+| 4 | Files go to HA's `/media` or a NAS: **Settings → System → Storage → Add network storage**, usage **Media** | Home Assistant |
+| 5 | In MA add a **Filesystem** provider pointing at your music folder | [filesystem](https://music-assistant.io/music-providers/filesystem/) |
+| 6 | For books — **a separate folder and a separate provider** with content type **Audiobooks** | same |
+| 7 | Rescan the provider in MA → open **Медиатека** in the panel → activate folders | panel |
+
+**Books:** one book = a folder of numbered chapters with the same `album`/`artist` tags, or a single `.m4b` file. In a music provider chapters become tracks and nothing resumes.
+
+**Speakers:** the Media library status line shows which Station maps to which MA player; you can pick one by hand.
 
 > Known MA 2.10.x limitation: its native **Yandex Station** provider may play the wrong stream
 > ([fix #5605](https://github.com/music-assistant/server/pull/5605)). Use **Home Assistant
