@@ -2,124 +2,63 @@
 
 [Русская версия](README.md)
 
-A **Яндекс меню** ("Yandex menu") item in the Home Assistant sidebar. It does two things:
+A **Яндекс меню** ("Yandex menu") item in the Home Assistant sidebar. Two big jobs:
 
-1. **Your Yandex home devices.** Every lamp, switch and other device, room by room, together with
-   the things you normally have to open the Yandex app ("Дом с Алисой") for: what a device is called
-   by voice, which room it is in, and which lamp comes on when you say "Alice, turn on the light".
-2. **Your audio library by voice.** Alice plays your own books and music from Music Assistant
-   by a phrase ("Алиса, включи мюнхгаузена") on the speaker that heard it. Then you control them
-   by voice: next chapter, seek, repeat, "what is playing", "transfer here".
+| | What | What you get |
+|---|---|---|
+| 💡 | **Your Yandex home devices** | Every lamp, switch and sensor, room by room: what each is called by voice, where it lives, which lamp answers "Alice, turn on the light" — and editing all of it without the "Дом с Алисой" app |
+| 🎧 | **Your audio library by voice** | Your own books and music from Music Assistant, started by an Alice phrase on the speaker that heard it, and voice controls: chapters, seek, repeat, "what is playing", "transfer here" |
 
-No separate Yandex login is needed — the integration uses the same access that
-[Yandex Station](https://github.com/AlexxIT/YandexStation) already has.
+> No separate Yandex login: the panel uses the access [Yandex Station](https://github.com/AlexxIT/YandexStation) already has.
 
 ![The Yandex menu panel in Home Assistant: a Yandex home listed room by room, every device with icons for what it can do, and an open device card showing the words to say to Alice](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/panel.png)
 
-One thing to know before you start: the panel itself is in Russian, just as in the screenshot
-above. Only the setup and options dialogs are translated. So buttons and sections are named here in
-English, with the Russian original — the one you will see on screen — in brackets, and messages
-from the panel are quoted in Russian, with what they mean in brackets.
+## 💡 Yandex home devices
 
-## Why you might need it
+**Why.** Stop guessing what a lamp is called ("turn off the chandelier" — no, "turn off the backlight" — no again), and stop reaching for the phone to fix it.
 
-A home collects a dozen devices over time, and the hard part is remembering what they are called.
-To switch off one lamp in the living room you start guessing: "Alice, turn off the chandelier" —
-wrong one, "turn off the ambient light" — wrong again. The names live in the Yandex app, and you
-are at the computer, in Home Assistant.
+### Find and recall
 
-The panel shows everything at once: one click in the sidebar and there is the whole list by room —
-every device your Yandex home knows about and what each of them is called by voice. The
-Home Assistant entity the device is linked to is right there next to it. No need to reach for the
-phone.
+| Feature | How it works |
+|---|---|
+| **All / On** | The second view shows only what is on right now |
+| **"Just now"** | Flip a switch — the device pops up on top with its voice name |
+| **Search** | By name, HA entity and room: "кухня" shows everything in the kitchen; е = ё |
+| **"Name it so"** | A word isn't found → pick the device and the panel adds that name |
+| **Blink** | A light or socket turns on for 3 seconds — you see which of three identical lamps it is |
 
-From there you can simply look a name up, or fix it on the spot: give a device a name that makes
-sense, or add synonyms so it answers to whichever variant comes to mind first. If you cannot tell
-which lamp you are looking at, the **blink** button (Проверить: мигнуть) turns it on for three
-seconds.
+### Edit
 
-That familiar "Alice, turn on the light", which lights up the whole room at once, is fixed here
-too — that is what the main and secondary light roles on a lamp are for.
+| Feature | How it works |
+|---|---|
+| **Voice names** | Up to five per device; the panel warns about duplicates and overlaps |
+| **Main / extra light** | Fixes "turn on the light" switching on everything |
+| **Room** | Move a device between Yandex rooms |
+| **Snapshot** | If Yandex recreates a device, names and role come back with one button |
 
-## Features
+### Voice and Home Assistant
 
-### Books and music by voice
+| Feature | How it works |
+|---|---|
+| **What to say to Alice** | A device's skills and command words; any phrase can be tested on a Station |
+| **Room commands** | What to say about the light in a room and the whole home, who answers "turn on the light" |
+| **Scenarios** | Yandex scenarios with their trigger phrases and a test button |
+| **Expose to Alice / remove** | An HA entity appears in Alice or leaves it; the entity itself stays |
+| **Delete from the Yandex home** | For devices not from HA — with confirmation |
+| **Several accounts and homes** | Account choice in settings, a tab per home |
 
-- **A phrase for each book or album.** Music Assistant folders appear in the **Медиатека**
-  (Media library) section. Add up to four phrases and press Activate — the panel creates the
-  Yandex scenario itself.
-- **Books resume where they stopped,** on any speaker in the home: start in the kitchen, go on in the living room.
-- **Voice controls.** Next and previous (chapters in a book), resume, restart, seek 30 seconds,
-  shuffle, repeat, "what is playing" and "transfer here". Details in [Play by voice](#play-by-voice).
+## 🎧 Audio library by voice
+
+**Why.** Say "Alice, play Munchausen" and the speaker resumes the book where it stopped — from your own disk or NAS, not Yandex Music.
+
+| Feature | How it works |
+|---|---|
+| **Your phrase** | Up to four phrases per book, album or artist → Activate → the Yandex scenario is ready |
+| **Books resume** | On any speaker in the home: start in the kitchen, go on in the living room |
+| **Voice controls** | 13 commands: next/previous (chapters in a book), seek, repeat, shuffle, "what is playing", "transfer here" — [list](#voice-controls) |
+| **Refresh library** | Music Assistant rescans your files; if it can't, the panel says why |
 
 ![The Media library section: artist folders, albums and audiobooks from Music Assistant, active ones with their Alice phrases](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/media.png)
-
-### Recalling what a device is called
-
-- **What is on right now.** A switch above the list: **All / On** (Все / Включено). The second view
-  keeps only the devices that are on at this moment, and the number on the button updates by itself.
-- **Flip it and see the name.** Cannot remember what a lamp is called? Turn it on or off by hand.
-  In the "On" view it shows up at the top straight away, in the **Just now** block (Только что),
-  with the name it answers to.
-- **Search.** Looks through names, Home Assistant entities and rooms: typing a room name shows
-  everything in that room. Words can go in any order, and "е" and "ё" are treated as the same letter.
-- **"Name it so"** (Назвать так). If the word you searched for was not found, nothing in Yandex is
-  called that. The panel offers to pick the device you call that way and adds the name to it.
-
-### Names, rooms and the light role
-
-- **Voice names.** Up to five per device. When a new name duplicates another one or overlaps it,
-  the panel warns you first and adds the name only on the second press: when one name sits inside
-  another ("Ambient light" inside "Sofa ambient light"), Alice acts on the shorter one.
-- **Main and secondary light.** The role switch — the fix for "turn on the light". Yandex lets you
-  change the role only on some lamps — where it cannot be changed, the card simply has no switch.
-- **Room** (Комната). Moves a device between Yandex rooms — the same ones you have in the Yandex
-  app.
-
-### Voice commands
-
-- **What to say to Alice.** For every device you can see what it can do and the words that go into
-  commands: brightness, colours, modes, vacuum speed, questions for sensors. Any phrase can be
-  tried out — a Station runs it as if you had said it out loud.
-- **Room commands.** Every room title has a button of its own: what to say about the light in that
-  room and in the whole home, which lamps answer "turn on the light" and which come on by name
-  only.
-- **Scenarios.** The scenarios from the Yandex app are listed with the phrases that start them, and
-  with the same test button.
-
-### Working with Home Assistant
-
-- **Expose an entity to Alice, and take it away again.** Finds the entities in Home Assistant that
-  Alice does not have yet, adds a label and asks Yandex to refresh the list. **Remove from Alice**
-  (Убрать из Алисы) takes the label off and deletes the device; the entity itself stays in
-  Home Assistant.
-- **Delete a device from the Yandex home.** Devices that did not come from Home Assistant have a
-  **Delete** button (Удалить) at the bottom of the card, which removes the device from the Yandex
-  home altogether. The panel asks for confirmation, but it cannot bring a deleted device back.
-- **Refresh the list** (Обновить список). Asks Yandex to go through the Home Assistant skill
-  again — freshly exposed entities show up in Alice after that. Until at least one device has been
-  exposed from Home Assistant, there is no skill and nothing to refresh — expose one
-  entity to Alice first. The panel also reads every device again, so whatever was changed in the
-  «Дом с Алисой» app (a second name, the light role) turns up.
-
-### Safety net
-
-- **Name snapshot.** If Yandex recreates a device, its synonyms and its role are gone. The panel
-  keeps the last good set and offers to put it back with one button — in the device card the
-  section is called simply **Snapshot** (Слепок). It writes the snapshots itself, but only for
-  devices with a Home Assistant entity behind them: every time it reads the list, and straight
-  away after you change something from the panel. Yandex's own devices are not covered.
-- **The blink check.** Lights, sockets and switches have a button that turns the device on for
-  three seconds and off again — handy when a room has three identical lamps and you cannot tell
-  which is which. If the device was already on, it goes off for three seconds and comes back on
-  instead. Curtains, kettles and sensors have no such button.
-
-### When there is more than one account or home
-
-- **Several Yandex accounts.** If Home Assistant has more than one, the integration options let you
-  pick which account the panel works with.
-- **Several homes.** If the account has more than one home (a flat and a country house), each gets
-  a tab of its own: its own rooms, scenarios and Stations for testing phrases.
 
 ## Before you install
 
@@ -266,47 +205,55 @@ Home Assistant.
 
 ## Play by voice
 
-The **Медиатека** (Media library) section sits between rooms and Scenarios. Top-level folders
-from Music Assistant file providers are visible immediately, in the same row style as devices. New folders show
-**Ждёт активации** (Waiting for activation): nothing is written to Yandex automatically.
-Open a card, enter one to **four phrases** — Yandex's limit — and press **Активировать**
-(Activate). For a Beatles folder you could use “включи битлов”. Add phrases through the
-**Новая фраза** (New phrase) field; suggestion chips fill that field. The first phrase is marked
-as primary. Adding or removing a phrase on an active launch updates its scenario immediately.
-Duplicate phrases block saving; warnings about overlapping device names need a second press.
+The **Медиатека** (Media library) section sits after the rooms, before Scenarios. It needs Music Assistant — see [Your own files on a speaker](#your-own-files-on-a-speaker).
 
-An album plays in full. An audiobook resumes where it stopped, using MA's saved position,
-shared by the household. An artist folder containing several albums plays those albums in
-subfolder date order, falling back to name order. Alice's pause and sleep timer preserve the
-book position. The **Добавить запуск** (Add launch) row opens MA search for a manual card.
+### Launching a book or album
+
+1. Find the folder (new ones are marked **Ждёт активации**, waiting for activation — nothing goes to Yandex by itself).
+2. Enter **1–4 phrases** (Yandex's limit), e.g. "включи битлов". The first one is primary.
+3. Press **Активировать** (Activate).
+
+| What plays | How |
+|---|---|
+| Album | in full |
+| Audiobook | from the saved position, shared by the whole home |
+| Artist folder | albums by the date in the folder name, else by name |
+| **Добавить запуск** (Add launch) | anything from MA search |
+
+The card also has Alice's reply (**"Включаю ‹title›"** or silence), **Проверить** (Test) on a chosen speaker, and the last result.
 
 ![An audiobook card: four launch phrases, the first one primary, then what plays and Alice's reply](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/launch.png)
 
-Choose Alice's “Включаю ‹title›” reply or silence. **Проверить** (Test) uses the selected
-speaker and shows the latest result. A spoken phrase plays on the speaker that heard it.
-If speaker mappings or cloud updates need attention, a warning appears above the folders.
-**Исправить** (Fix) opens the **Колонки** (Speakers) side panel, where you can select an MA
-player. The launch card's **Проверить** section also provides access to this panel.
+### Voice controls
 
-The **Управление голосом** (Voice controls) subsection enables “дальше” (next), “назад”
-(previous), “продолжи” (resume) and “сначала” (restart). Open a row, adjust the preset
-phrases if needed, and press **Активировать** (Activate). Commands act on the speaker
-that heard them: next and previous switch tracks or audiobook
-chapters when available; resume continues after a pause; restart begins the book or current
-track again. Also available: seek forward/back 30 seconds, shuffle on/off, and repeat all/one/off.
-“What is playing” speaks the artist and track or book and chapter; “transfer here” moves music or a book from another speaker in the same home, preserving its position (Alice tells you if nothing is playing elsewhere). Each command creates a separate Yandex scenario: enable only those you need.
-Pause and stop are built into Alice and need no separate activation.
+Each command is a separate Yandex scenario: open its row → **Активировать**. Enable only the ones you need. A command acts on the speaker that heard it.
+
+| Command | Default phrases | Music | Book |
+|---|---|---|---|
+| Next | "дальше", "следующий трек", "следующая песня", "следующая глава" | next track | next chapter |
+| Previous | "назад", "предыдущий трек", "предыдущая песня", "предыдущая глава" | previous track | previous chapter |
+| Resume | "продолжи", "продолжай", "играй дальше" | unpause | unpause |
+| Restart | "сначала", "с начала", "включи сначала" | track from start | book from start |
+| Seek | "перемотай вперёд", "вперёд на 30 секунд"… / "перемотай назад"… | ±30 s | ±30 s |
+| Shuffle | "перемешай", "в случайном порядке"… / "по порядку"… | on / off | — |
+| Repeat | "повторяй", "повторяй трек", "не повторяй"… | all / track / off | book |
+| What is playing | "что играет", "что сейчас играет", "какая глава"… | artist and track | book and chapter |
+| Transfer here | "перенеси сюда", "играй здесь"… | from another speaker in the home, same position | same |
+
+> **Pause, stop, volume and sleep timer** are built into Alice — nothing to enable. They keep the book position.
 
 ![The Voice controls subsection: next and previous track, resume, restart and seek, each with its phrases and marked active](https://raw.githubusercontent.com/busyava/yandex-menu-for-home-assistant/main/docs/controls.png)
 
-Errors are spoken even in silent mode: “Music Assistant недоступен” (MA is unavailable),
-“Не нашла, где играть на этой колонке” (no matching player), or “Не нашла ‹title› в библиотеке”
-(media is missing). A phrase launched from the app or a phone may have no matching speaker.
+### Errors and cleanup
 
-**Отключить** (Deactivate) removes the Yandex scenario and keeps the card ready for activation.
-**Не показывать** (Hide) permanently excludes a folder; refreshing the library will not bring it back. An active folder that disappears is marked
-**Папка пропала** (Folder missing); its scenario is never deleted automatically. Remove it
-from its card or use **Удалить пропавшие** (Delete missing), with confirmation.
+| Situation | What happens |
+|---|---|
+| MA unavailable / no player / not in the library | Alice says so even in silent mode |
+| Phrase from the app or a phone | no speaker may match |
+| Speaker problem | a warning above the folders → **Исправить** (Fix) → pick an MA player |
+| **Отключить** (Deactivate) | the Yandex scenario is removed, the card stays |
+| **Не показывать** (Hide) | the folder is hidden for good |
+| **Папка пропала** (Folder missing) | the scenario is not deleted by itself → remove it in the card or with **Удалить пропавшие** |
 
 ## Your own files on a speaker
 
