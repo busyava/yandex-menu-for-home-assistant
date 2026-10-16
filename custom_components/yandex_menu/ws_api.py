@@ -1552,7 +1552,10 @@ def _voice_command(action: str):
             connection.send_error(msg["id"], "not_loaded", "Яндекс меню ещё не загружено")
             return
         try:
-            payload = await manager.command(action, msg)
+            if action == "refresh":
+                payload = await manager.command(action, msg, user_id=connection.user.id)
+            else:
+                payload = await manager.command(action, msg)
         except QuasarError as err:
             connection.send_error(msg["id"], err.code or "quasar_error", str(err))
             return

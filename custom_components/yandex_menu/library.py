@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
+
+import aiohttp
 
 PAGE_SIZE = 200
 SCAN_TIMEOUT = 300
+SCAN_POLL_INTERVAL = 2
 FILE_PROVIDERS = {"filesystem_local", "filesystem_smb"}
+SCAN_AUTH_ERROR = ("Music Assistant не дал запустить скан: ваш пользователь Home Assistant "
+                   "должен быть администратором в Music Assistant")
 
 
 def _get(obj: Any, key: str, default=None):
@@ -29,7 +36,7 @@ def get_mass(hass):
 
 
 def _providers(mass):
-    return [p for p in mass.providers if _get(p, "domain") in FILE_PROVIDERS]
+    return [p for p in getattr(mass, "providers", ()) if _get(p, "domain") in FILE_PROVIDERS]
 
 
 def _parts(path):
@@ -163,6 +170,197 @@ async def read_library(mass) -> dict:
     return result
 
 
+def task_provider(task):
+    """Источник задачи в новом и прежнем протоколе MA."""
+    return _get(_get(task, "metadata", {}), "provider_instance") or _get(task, "provider_instance")
+
+
+def task_active(task):
+    """В старом протоколе список содержит только выполняющиеся задачи."""
+    status = _get(task, "status")
+    return status in ("pending", "running") or (status is None and not _get(task, "metadata"))
+
+
+def scan_tasks(data, providers=None):
+    """Выбрать задачи синхронизации, включая их конечные состояния."""
+    if not isinstance(data, list):
+        return []
+    return [task for task in data
+            if ((_get(_get(task, "metadata", {}), "task_domain") == "music_sync")
+                or (not _get(task, "metadata") and _get(task, "provider_instance")))
+            and (providers is None or task_provider(task) in providers)]
+
+
+def _task_error(task):
+    status = _get(task, "status")
+    if status in ("pending", "running"):
+        return None  # last_error может остаться от прошлого запуска
+    error = _get(task, "last_error")
+    if error:
+        return str(error)
+    if status in ("failed", "cancelled", "partial_success"):
+        messages = _get(task, "failure_messages") or []
+        return "; ".join(str(message) for message in messages) or f"Задача скана Music Assistant: {status}"
+    if status not in ("pending", "running", "success"):
+        return "Music Assistant вернул неизвестное состояние задачи скана"
+    return None
+
+
+async def _scan_progress(progress, tasks):
+    if progress:
+        active = [task for task in tasks if task_active(task)]
+        value = progress({"stage": "scan", "tasks": len(active),
+                          "providers": sorted({task_provider(task) for task in active if task_provider(task)})})
+        if inspect.isawaitable(value):
+            await value
+
+
+def _supervisor_data(response):
+    # HassIO.send_command возвращает весь JSON Supervisor, включая result/data.
+    if not isinstance(response, dict) or response.get("result") == "error":
+        raise ValueError("Supervisor не смог подготовить скан Music Assistant")
+    data = response.get("data", response)
+    if not isinstance(data, dict):
+        raise ValueError("Supervisor вернул неверный ответ")
+    return data
+
+
+async def ingress_scan(hass, ha_user_id, providers, progress=None) -> dict:
+    """Скан под пользователем HA через доверенную ingress-сессию Supervisor."""
+    result = {"available": False, "scan_requested": False, "scheduled": True, "error": None}
+    if not ha_user_id or not os.environ.get("SUPERVISOR"):
+        return result
+    # Импорт ленивый: обычная установка HA не обязана иметь Supervisor.
+    from homeassistant.components.hassio.const import DATA_COMPONENT
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    if "hassio" not in hass.config.components or DATA_COMPONENT not in hass.data:
+        return result
+    supervisor = hass.data[DATA_COMPONENT]
+    ws = None
+    try:
+        result["available"] = True
+        async with asyncio.timeout(SCAN_TIMEOUT):
+            slug = None
+            for entry in hass.config_entries.async_entries("music_assistant"):
+                hostname = urlsplit(entry.data.get("url", "")).hostname or ""
+                candidate = hostname.replace("-", "_")
+                if candidate.endswith("_music_assistant"):
+                    slug = candidate
+                    break
+            if not slug:
+                addons = _supervisor_data(await supervisor.send_command("/addons", method="get"))
+                slug = next((_get(addon, "slug") for addon in addons.get("addons", [])
+                             if str(_get(addon, "slug", "")).endswith("music_assistant")
+                             and (_get(addon, "ingress") or _get(addon, "ingress_entry"))
+                             and _get(addon, "state") == "started"), None)
+            if not slug:
+                result["available"] = False
+                return result
+            info = _supervisor_data(await supervisor.send_command(f"/addons/{slug}/info", method="get"))
+            ingress_path = info.get("ingress_entry", "")
+            if info.get("state") != "started" or not ingress_path.startswith("/api/hassio_ingress/"):
+                result["available"] = False
+                return result
+            token = ingress_path.removeprefix("/api/hassio_ingress/").strip("/")
+            if not token or "/" in token:
+                raise ValueError("Supervisor вернул неверный путь ingress Music Assistant")
+            if not providers:
+                result["error"] = "Нет файловых источников Music Assistant"
+                return result
+            session_data = _supervisor_data(await supervisor.send_command(
+                "/ingress/session", method="post", payload={"user_id": ha_user_id}))
+            session = session_data.get("session")
+            if not isinstance(session, str) or not session:
+                raise ValueError("Supervisor не создал ingress-сессию Music Assistant")
+            ws = await async_get_clientsession(hass).ws_connect(
+                f"ws://{os.environ['SUPERVISOR']}/ingress/{token}/ws",
+                headers={"Cookie": f"ingress_session={session}", "X-Hass-Source": "core.ingress",
+                         "X-Ingress-Path": ingress_path})
+
+            async def receive():
+                message = await ws.receive()
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    raise ConnectionError("Соединение скана Music Assistant закрыто")
+                data = message.json()
+                if not isinstance(data, dict):
+                    raise ValueError("Music Assistant вернул неверный ответ скана")
+                return data
+
+            hello = await receive()  # MA авторизует ingress до чтения команд.
+            if "error_code" in hello:
+                if str(hello["error_code"]) in {"20", "21", "22", "23", "401", "403"}:
+                    raise PermissionError(SCAN_AUTH_ERROR)
+                raise ValueError(str(hello.get("details") or "Music Assistant отклонил соединение скана"))
+            sequence = 0
+
+            async def command(name, args):
+                nonlocal sequence
+                sequence += 1
+                message_id = f"yandex_menu_scan_{sequence}"
+                await ws.send_json({"message_id": message_id, "command": name, "args": args})
+                partial = []
+                while True:
+                    data = await receive()
+                    if data.get("message_id") not in (message_id, "connection"):
+                        continue  # события и ответы других команд
+                    if "error_code" in data:
+                        code = str(data["error_code"])
+                        if code in {"20", "21", "22", "23", "401", "403"}:
+                            raise PermissionError(SCAN_AUTH_ERROR)
+                        raise ValueError(str(data.get("details") or "Ошибка команды скана Music Assistant"))
+                    if "result" not in data:
+                        continue
+                    value = data["result"]
+                    if data.get("partial"):
+                        if not isinstance(value, list):
+                            raise ValueError("Music Assistant вернул неверный ответ скана")
+                        partial.extend(value)
+                        continue
+                    return partial + value if partial and isinstance(value, list) else value
+
+            tasks = await command("music/sync", {"media_types": ["track", "audiobook"],
+                                                 "providers": list(providers)})
+            result["scan_requested"] = True
+            if not isinstance(tasks, list):
+                raise ValueError("Music Assistant не вернул задачи скана")
+            while True:
+                for task in tasks:
+                    if error := _task_error(task):
+                        raise ValueError(error)
+                    if not _get(task, "id"):
+                        raise ValueError("Music Assistant вернул задачу скана без идентификатора")
+                await _scan_progress(progress, tasks)
+                active = [task for task in tasks if task_active(task)]
+                if not active:
+                    result["scheduled"] = False
+                    return result
+                await asyncio.sleep(SCAN_POLL_INTERVAL)
+                # tasks/get проверяет именно запущенные задачи; пропавшая задача — ошибка,
+                # а не свидетельство успешного завершения полного снимка библиотеки.
+                updated = []
+                for task in active:
+                    task_id = _get(task, "id")
+                    value = await command("tasks/get", {"task_id": task_id})
+                    if _get(value, "id") != task_id:
+                        raise ValueError("Music Assistant не подтвердил задачу скана")
+                    updated.append(value)
+                tasks = updated
+    except TimeoutError:
+        result["error"] = "Не удалось дождаться завершения скана Music Assistant"
+    except aiohttp.WSServerHandshakeError as err:
+        result["error"] = SCAN_AUTH_ERROR if err.status in (401, 403) else "Не удалось подключиться к скану Music Assistant"
+    except aiohttp.ClientError:
+        # В тексте aiohttp-ошибки бывает URL с секретным ingress-токеном.
+        result["error"] = "Соединение скана Music Assistant недоступно"
+    except Exception as err:
+        result["error"] = str(err) or type(err).__name__
+    finally:
+        if ws is not None:
+            await ws.close()
+    return result
+
+
 async def scan_library(mass, progress=None) -> dict:
     """Запросить скан и дождаться его событий, а не только ответа music/sync."""
     result = {"scan_requested": False, "scheduled": True, "error": None}
@@ -178,29 +376,70 @@ async def scan_library(mass, progress=None) -> dict:
         changed = asyncio.Event()
         tasks = None
         seen_running = False
+        modern = False
+        tracked = set()
+        baseline = None
+        watching = False
+
+        def requested(data):
+            return [task for task in scan_tasks(data, providers)
+                    if not _get(task, "metadata")
+                    or _get(_get(task, "metadata"), "media_type") in ("track", "audiobook")]
+
+        def run_identity(task):
+            return (_get(task, "last_run"), _get(task, "started_at"))
 
         def updated(event):
-            nonlocal tasks, seen_running
+            nonlocal tasks, seen_running, modern
             data = _get(event, "data")
-            if not isinstance(data, list):
+            if not watching or not isinstance(data, list):
                 return
-            tasks = [t for t in data if _get(t, "provider_instance") in providers]
-            seen_running = seen_running or bool(tasks)
+            tasks = requested(data)
+            modern = _get(event, "event") == "tasks_updated" or any(_get(t, "metadata") for t in tasks)
+            active = [task for task in tasks if task_active(task)]
+            tracked.update(_get(task, "id") for task in active if _get(task, "id"))
+            if baseline is not None:
+                tracked.update(_get(task, "id") for task in tasks if _get(task, "id")
+                               and (_get(task, "id") not in baseline
+                                    or run_identity(task) != baseline[_get(task, "id")]))
+            seen_running = seen_running or bool(active)
             changed.set()
 
         # Подписка до команды: короткий скан может закончиться раньше ответа.
-        unsubscribe = mass.subscribe(updated, ("sync_tasks_updated",))
+        unsubscribe = mass.subscribe(updated, ("tasks_updated", "sync_tasks_updated"))
         async with asyncio.timeout(SCAN_TIMEOUT):
+            if send_command := getattr(mass, "send_command", None):
+                try:
+                    previous = await send_command("tasks/list")
+                except Exception as err:
+                    if _get(err, "error_code") != 12:  # старый MA: InvalidCommand
+                        raise
+                else:
+                    if not isinstance(previous, list):
+                        raise ValueError("Music Assistant не вернул список задач скана")
+                    # started_at/last_run отличают новый короткий запуск от истории;
+                    # updated_at меняется также при редактировании расписания.
+                    baseline = {_get(task, "id"): run_identity(task) for task in requested(previous)}
+                    tracked.update(_get(task, "id") for task in requested(previous)
+                                   if _get(task, "id") and task_active(task))
+            watching = True
             await mass.music.start_sync(media_types=["track", "audiobook"], providers=providers)
             result["scan_requested"] = True
             while True:
                 await changed.wait()
                 changed.clear()
-                if progress:
-                    value = progress({"stage": "scan", "tasks": len(tasks)})
-                    if inspect.isawaitable(value):
-                        await value
-                if seen_running and not tasks:
+                await _scan_progress(progress, tasks)
+                if modern and tracked:
+                    current = {_get(task, "id"): task for task in tasks}
+                    if tracked - current.keys():
+                        raise ValueError("Music Assistant не подтвердил завершение задач скана")
+                    for task_id in tracked:
+                        if error := _task_error(current[task_id]):
+                            raise ValueError(error)
+                    if tracked and all(_get(current[task_id], "status") == "success" for task_id in tracked):
+                        result["scheduled"] = False
+                        return result
+                elif seen_running and not tasks:
                     result["scheduled"] = False
                     return result
     except TimeoutError:

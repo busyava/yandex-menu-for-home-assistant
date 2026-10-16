@@ -140,8 +140,10 @@ class VoiceManager:
         self.mass_observed = None
         self.mass_unsubscribe = None
         self.scanning = set()
+        self.mass_scanning = set()
+        self.ingress_scanning = set()
         self.cloud_recovery_needed = False
-        self.library_state = {"complete": False, "error": None, "syncing": False, "progress": None, "scan_scheduled": False}
+        self.library_state = {"complete": False, "error": None, "syncing": False, "progress": None, "scan_scheduled": False, "scan_error": None}
 
     @property
     def launches(self):
@@ -502,30 +504,44 @@ class VoiceManager:
                 _LOGGER.debug("Не удалось произнести ошибку", exc_info=True)
         return result
 
-    async def refresh(self, scan=False):
+    async def refresh(self, scan=False, user_id=None):
         if self.closed:
             return self.library_state
         if self.sync_task and self.sync_task is not asyncio.current_task() and not self.sync_task.done():
             return await asyncio.shield(self.sync_task)
-        self.sync_task = self.task(self._sync(scan), True)
+        self.sync_task = self.task(self._sync(scan, user_id), True)
         return await asyncio.shield(self.sync_task)
 
-    async def _sync(self, scan):
+    async def _sync(self, scan, user_id=None):
         async with self.sync_lock:
             self.library_state["syncing"] = True
             try:
                 self._check_account()
                 mass = library.get_mass(self.hass)
                 self.observe_mass(mass)
+                if scan:
+                    self.library_state.update(scan_scheduled=True, scan_error=None)
                 if mass is None:
+                    if scan:
+                        self.library_state["scan_error"] = self._scan_error("Music Assistant недоступен")
                     self.library_state.update(complete=False, error="Доступны только ручные карточки: клиент библиотеки MA недоступен" if self.ma_available() else "Music Assistant недоступен")
                     for launch in self.launches.values():
                         launch.update(missing_since=None, missing_confirmed=False)
                     await self.store.save()
                     return self.library_state
                 if scan:
-                    result = await library.scan_library(mass, self._progress)
-                    self.library_state["scan_scheduled"] = result.get("scheduled", False)
+                    providers = [library._get(p, "instance_id") for p in library._providers(mass)]
+                    self.ingress_scanning = set(providers)
+                    self.scanning.update(providers)
+                    try:
+                        result = await library.ingress_scan(self.hass, user_id, providers, self._progress)
+                        if not result.get("available"):
+                            result = await library.scan_library(mass, self._progress)
+                        self.library_state["scan_scheduled"] = result.get("scheduled", True)
+                        self.library_state["scan_error"] = self._scan_error(result["error"]) if result.get("error") else None
+                    finally:
+                        self.ingress_scanning.clear()
+                        self.scanning = set(self.mass_scanning)
                 snapshot = await library.read_library(mass)
                 self.snapshot = snapshot
                 self.library_state.update(complete=snapshot["complete"], error=snapshot.get("error"), warnings=snapshot.get("warnings", []))
@@ -542,6 +558,10 @@ class VoiceManager:
                 return self.library_state
             finally:
                 self.library_state["syncing"] = False
+
+    @staticmethod
+    def _scan_error(error):
+        return f"{error}. Запустите синхронизацию в Music Assistant: Настройки → Поставщики → <имя источника> → Синхронизировать"
 
     async def apply_snapshot(self, snapshot):
         now = time.time()
@@ -647,14 +667,17 @@ class VoiceManager:
             self.mass_unsubscribe()
         self.mass_observed = mass
         self.mass_unsubscribe = None
-        self.scanning.clear()
+        self.mass_scanning.clear()
+        self.scanning = set(self.ingress_scanning)
         if mass is None or not hasattr(mass, "subscribe"):
             return
         def updated(event):
             values = event.get("data") if isinstance(event, dict) else getattr(event, "data", None)
             if isinstance(values, list):
-                self.scanning = {t.get("provider_instance") if isinstance(t, dict) else getattr(t, "provider_instance", None) for t in values}
-        self.mass_unsubscribe = mass.subscribe(updated, ("sync_tasks_updated",))
+                self.mass_scanning = {library.task_provider(t) for t in library.scan_tasks(values)
+                                      if library.task_active(t)}
+                self.scanning = self.mass_scanning | self.ingress_scanning
+        self.mass_unsubscribe = mass.subscribe(updated, ("sync_tasks_updated", "tasks_updated"))
 
     def refuse_unverified_create(self, launch, body):
         # Имя не доказывает владение и не позволяет привязать id. Но пока
@@ -840,10 +863,10 @@ class VoiceManager:
         config = self.hass.data.get("yandex_station", {}).get("config", {})
         return {"ma_available": self.ma_available(), "cloud_updates": bool(config.get("cloud_updates", True)), "updates_running": bool(updates and not updates.done()), "manual_only": library.get_mass(self.hass) is None}
 
-    async def command(self, action, msg):
+    async def command(self, action, msg, user_id=None):
         if self.closed:
             raise ValueError("Голосовые запуски отключены — откройте панель заново")
-        operation = self.hass.async_create_task(self._command(action, msg))
+        operation = self.hass.async_create_task(self._command(action, msg, user_id))
         self.commands.add(operation)
         operation.add_done_callback(self.commands.discard)
         try:
@@ -853,7 +876,7 @@ class VoiceManager:
             await asyncio.shield(operation)
             raise
 
-    async def _command(self, action, msg):
+    async def _command(self, action, msg, user_id=None):
         self._check_account()
         if action == "save":
             return await self.save(msg)
@@ -869,8 +892,8 @@ class VoiceManager:
                 self.library_state.update(syncing=False, progress=None)
                 return {"cancelled": True}
             if not self.sync_task or self.sync_task.done():
-                self.library_state.update(syncing=True, progress=None)
-                self.sync_task = self.task(self._sync(True), True)
+                self.library_state.update(syncing=True, progress=None, scan_scheduled=True, scan_error=None)
+                self.sync_task = self.task(self._sync(True, user_id), True)
             return {"library": deepcopy(self.library_state)}
         if action == "search":
             if not self.ma_available():

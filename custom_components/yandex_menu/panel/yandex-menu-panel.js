@@ -2532,6 +2532,7 @@ class YandexMenuPanel extends HTMLElement {
     if (!health.ma_available) return html + `<div class="lead"><div class="msg warn">Нужен Music Assistant — сервер и интеграция в Home Assistant. <a href="https://github.com/busyava/yandex-menu-for-home-assistant#свои-файлы-на-колонке" target="_blank" rel="noopener noreferrer">Как подключить</a></div></div></div></section>`;
     if (!health.cloud_updates || !health.updates_running || !(state.speakers || []).length || (state.speakers || []).some((speaker) => !speaker.ma_entity_id || speaker.reason) || health.manual_only || (state.orphans || []).length) html += `<div class="lead"><div class="msg warn">${health.manual_only ? "Библиотека недоступна. " : ""}Проверьте колонки и облачные обновления. ${this._voiceButton("columns", "Исправить")}</div></div>`;
     if (lib.error) html += `<div class="lead"><div class="msg error">${esc(this._voiceErrorText(lib.error))}</div></div>`;
+    if (lib.scan_error) html += `<div class="lead"><div class="msg warn">${esc(lib.scan_error)}</div></div>`;
     for (const warning of lib.warnings || []) html += `<div class="lead"><div class="msg warn">Пропущено: ‹${esc(warning.folder)}› — несколько книг/альбомов</div></div>`;
     html += (state.launches || []).filter((item) => this._voiceMatches(item, words)).map((item) => this._mediaRowHtml(item)).join("");
     html += `<button class="row" data-voice-action="add"><span class="avatar">＋</span><span class="title">Добавить запуск</span></button>`;
